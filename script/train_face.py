@@ -37,7 +37,7 @@ os.environ['WANDB_PROJECT'] = 'mcorec'
 
 
 
-def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming=False, mcorec_local_dir=None):
+def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming=False):
     # streaming=True to avoid downloading all dataset at once, but it can be crash if network is unstable
     # streaming=False to download all dataset at once, it take time and around 1.5TB disk space. More stable.
 
@@ -62,22 +62,7 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
             # Load mcorec dataset. Ensure you have permission to use this dataset.
             if include_mcorec:
                 print("Loading MCoRec dataset")
-                if mcorec_local_dir and os.path.exists(mcorec_local_dir):
-                    print(f"Loading MCoRec from local directory: {mcorec_local_dir}")
-                    processed_dir = mcorec_local_dir if os.path.basename(mcorec_local_dir) == "processed" else os.path.join(mcorec_local_dir, "processed")
-                    train_files = os.path.join(processed_dir, "mcorec-train-*.tar")
-                    valid_files = os.path.join(processed_dir, "mcorec-valid-*.tar")
-                    mcorec_dataset = datasets.load_dataset(
-                        "MCoRecChallenge/MCoRec",
-                        data_files={
-                            "train": train_files,
-                            "valid": valid_files
-                        },
-                        streaming=streaming,
-                        cache_dir=cache_dir
-                    ).remove_columns(['__key__', '__url__'])
-                else:
-                    mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+                mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
             finished_loading = True
         except Exception as e:
             try_times += 1
@@ -187,7 +172,6 @@ if __name__ == "__main__":
 
     parser.add_argument("--streaming_dataset", action="store_true", default=False)
     parser.add_argument("--include_mcorec", action="store_true", default=False)
-    parser.add_argument("--mcorec_local_dir", type=str, default=None, help="Local directory path for MCoRec dataset (e.g., /path/to/MCoRec/processed)")
     parser.add_argument("--batch_size", type=int, default=6)
     parser.add_argument("--max_steps", type=int, default=400000)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
@@ -206,7 +190,6 @@ if __name__ == "__main__":
 
     streaming_dataset = True if args.streaming_dataset else False
     include_mcorec = True if args.include_mcorec else False
-    mcorec_local_dir = args.mcorec_local_dir
     batch_size = args.batch_size
     max_steps = args.max_steps
     gradient_accumulation_steps = args.gradient_accumulation_steps
@@ -254,7 +237,7 @@ if __name__ == "__main__":
         avsr_model.avsr.encoder.load_state_dict(encoder_pretrained.state_dict())
     
     # Load dataset
-    train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(streaming=streaming_dataset, include_mcorec=include_mcorec, mcorec_local_dir=mcorec_local_dir)
+    train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(streaming=streaming_dataset, include_mcorec=include_mcorec)
         
     train_av_data_collator = DataCollator(
         text_transform=text_transform,
