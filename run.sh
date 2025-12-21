@@ -3,10 +3,10 @@
 # 環境変数の設定
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # 学習実行
-torchrun --nproc_per_node 2 script/train_face.py \
+torchrun --nproc_per_node 4 script/train_face.py \
     --streaming_dataset \
     --include_mcorec \
     --batch_size 6 \
