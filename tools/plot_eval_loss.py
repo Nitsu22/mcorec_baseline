@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-trainer_state.jsonからeval_lossのグラフを出力するスクリプト
+trainer_state.jsonからtrain_lossとeval_lossのグラフを出力するスクリプト
 """
 import os
 import json
@@ -10,16 +10,16 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 
-def load_eval_losses(checkpoint_dir):
+def load_losses(checkpoint_dir):
     """
     チェックポイントディレクトリから全てのtrainer_state.jsonを読み込み、
-    eval_lossとstepのペアを抽出する
+    train_lossとeval_lossとstepのペアを抽出する
     
     Args:
         checkpoint_dir: チェックポイントディレクトリのパス
         
     Returns:
-        list: [(step, eval_loss), ...] のリスト
+        tuple: (train_data, eval_data) それぞれ [(step, loss), ...] のリスト
     """
     json_files = glob.glob(os.path.join(checkpoint_dir, 'checkpoint-*/trainer_state.json'))
     
@@ -35,64 +35,102 @@ def load_eval_losses(checkpoint_dir):
     with open(latest_json, 'r') as f:
         data = json.load(f)
     
+    train_data = []
     eval_data = []
     if 'log_history' in data:
         for log_entry in data['log_history']:
-            if 'eval_loss' in log_entry and 'step' in log_entry:
-                eval_data.append((log_entry['step'], log_entry['eval_loss']))
+            if 'step' in log_entry:
+                step = log_entry['step']
+                if 'train_loss' in log_entry:
+                    train_data.append((step, log_entry['train_loss']))
+                if 'eval_loss' in log_entry:
+                    eval_data.append((step, log_entry['eval_loss']))
     
     # stepでソート
+    train_data.sort(key=lambda x: x[0])
     eval_data.sort(key=lambda x: x[0])
     
-    return eval_data
+    return train_data, eval_data
 
 
-def plot_eval_loss(eval_data, output_path):
+def plot_losses(train_data, eval_data, output_path):
     """
-    eval_lossのグラフを描画して保存する
+    train_lossとeval_lossのグラフを描画して保存する
     
     Args:
+        train_data: [(step, train_loss), ...] のリスト
         eval_data: [(step, eval_loss), ...] のリスト
         output_path: 出力ファイルのパス
     """
-    if not eval_data:
-        raise ValueError("eval_lossデータが見つかりません")
+    if not train_data and not eval_data:
+        raise ValueError("lossデータが見つかりません")
     
-    steps = [x[0] for x in eval_data]
-    eval_losses = [x[1] for x in eval_data]
+    plt.figure(figsize=(14, 7))
     
-    plt.figure(figsize=(12, 6))
-    plt.plot(steps, eval_losses, marker='o', linestyle='-', markersize=3, linewidth=1.5)
+    # train lossのプロット
+    if train_data:
+        train_steps = [x[0] for x in train_data]
+        train_losses = [x[1] for x in train_data]
+        plt.plot(train_steps, train_losses, marker='o', linestyle='-', markersize=2, 
+                linewidth=1.5, label='Train Loss', color='blue', alpha=0.7)
+    
+    # eval lossのプロット
+    if eval_data:
+        eval_steps = [x[0] for x in eval_data]
+        eval_losses = [x[1] for x in eval_data]
+        plt.plot(eval_steps, eval_losses, marker='s', linestyle='-', markersize=3, 
+                linewidth=1.5, label='Eval Loss', color='red', alpha=0.8)
+    
     plt.xlabel('Step', fontsize=12)
-    plt.ylabel('Evaluation Loss', fontsize=12)
-    plt.title('Evaluation Loss over Training Steps', fontsize=14, fontweight='bold')
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('Train Loss vs Evaluation Loss over Training Steps', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11, loc='best')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
     # 統計情報を表示
-    min_loss = min(eval_losses)
-    min_step = steps[eval_losses.index(min_loss)]
-    plt.text(0.02, 0.98, f'Min loss: {min_loss:.4f} at step {min_step}', 
-             transform=plt.gca().transAxes, fontsize=10,
-             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    info_text = []
+    if train_data:
+        train_losses = [x[1] for x in train_data]
+        train_steps = [x[0] for x in train_data]
+        min_train_loss = min(train_losses)
+        min_train_step = train_steps[train_losses.index(min_train_loss)]
+        info_text.append(f'Min train loss: {min_train_loss:.4f} at step {min_train_step}')
+    
+    if eval_data:
+        eval_losses = [x[1] for x in eval_data]
+        eval_steps = [x[0] for x in eval_data]
+        min_eval_loss = min(eval_losses)
+        min_eval_step = eval_steps[eval_losses.index(min_eval_loss)]
+        info_text.append(f'Min eval loss: {min_eval_loss:.4f} at step {min_eval_step}')
+    
+    if info_text:
+        plt.text(0.02, 0.98, '\n'.join(info_text), 
+                 transform=plt.gca().transAxes, fontsize=9,
+                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     print(f"グラフを保存しました: {output_path}")
-    print(f"データポイント数: {len(eval_data)}")
-    print(f"Step範囲: {steps[0]} - {steps[-1]}")
-    print(f"Loss範囲: {min(eval_losses):.4f} - {max(eval_losses):.4f}")
+    if train_data:
+        train_steps = [x[0] for x in train_data]
+        train_losses = [x[1] for x in train_data]
+        print(f"Train Loss - データポイント数: {len(train_data)}, Step範囲: {train_steps[0]} - {train_steps[-1]}, Loss範囲: {min(train_losses):.4f} - {max(train_losses):.4f}")
+    if eval_data:
+        eval_steps = [x[0] for x in eval_data]
+        eval_losses = [x[1] for x in eval_data]
+        print(f"Eval Loss - データポイント数: {len(eval_data)}, Step範囲: {eval_steps[0]} - {eval_steps[-1]}, Loss範囲: {min(eval_losses):.4f} - {max(eval_losses):.4f}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='trainer_state.jsonからeval_lossのグラフを出力')
+    parser = argparse.ArgumentParser(description='trainer_state.jsonからtrain_lossとeval_lossのグラフを出力')
     parser.add_argument('--checkpoint_dir', type=str, 
                        default='./model-bin/mcorec_finetuning_face',
-                       help='チェックポイントディレクトリのパス (default: ./model-bin/mcorec_finetuning)')
+                       help='チェックポイントディレクトリのパス (default: ./model-bin/mcorec_finetuning_face)')
     parser.add_argument('--output', type=str,
-                       default='./tools/eval_loss_plot.png',
-                       help='出力PNGファイルのパス (default: ./tools/eval_loss_plot.png)')
+                       default='./tools/loss_plot.png',
+                       help='出力PNGファイルのパス (default: ./tools/loss_plot.png)')
     
     args = parser.parse_args()
     
@@ -105,11 +143,11 @@ def main():
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     
-    # eval_lossデータの読み込み
-    eval_data = load_eval_losses(args.checkpoint_dir)
+    # train_lossとeval_lossデータの読み込み
+    train_data, eval_data = load_losses(args.checkpoint_dir)
     
     # グラフの描画と保存
-    plot_eval_loss(eval_data, args.output)
+    plot_losses(train_data, eval_data, args.output)
 
 
 if __name__ == '__main__':
