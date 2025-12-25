@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 python script/inference_face.py \
     --model_type avsr_cocktail \
     --session_dir "data-bin/dev/*" \
-    --checkpoint_path ./model-bin/mcorec_finetuning_face \
+    --checkpoint_path ./model-bin/mcorec_finetuning \
     --beam_size 3 \
     --max_length 15 \
     --output_dir_name output_finetuning_face 
