@@ -88,7 +88,7 @@ def plot_eval_loss(eval_data, output_path):
 def main():
     parser = argparse.ArgumentParser(description='trainer_state.jsonからeval_lossのグラフを出力')
     parser.add_argument('--checkpoint_dir', type=str, 
-                       default='./model-bin/mcorec_finetuning',
+                       default='./model-bin/mcorec_finetuning_face',
                        help='チェックポイントディレクトリのパス (default: ./model-bin/mcorec_finetuning)')
     parser.add_argument('--output', type=str,
                        default='./tools/eval_loss_plot.png',
