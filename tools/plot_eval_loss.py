@@ -41,8 +41,10 @@ def load_losses(checkpoint_dir):
         for log_entry in data['log_history']:
             if 'step' in log_entry:
                 step = log_entry['step']
-                if 'train_loss' in log_entry:
-                    train_data.append((step, log_entry['train_loss']))
+                # train lossは'loss'キーに格納されている
+                if 'loss' in log_entry and 'eval_loss' not in log_entry:
+                    train_data.append((step, log_entry['loss']))
+                # eval lossは'eval_loss'キーに格納されている
                 if 'eval_loss' in log_entry:
                     eval_data.append((step, log_entry['eval_loss']))
     
