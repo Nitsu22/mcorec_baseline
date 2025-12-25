@@ -55,12 +55,46 @@ def load_losses(checkpoint_dir):
     return train_data, eval_data
 
 
+def average_train_loss_by_eval_steps(train_data, eval_data):
+    """
+    train lossをeval lossと同じstepタイミングで平均化する
+    
+    Args:
+        train_data: [(step, train_loss), ...] のリスト（バッチごとのloss）
+        eval_data: [(step, eval_loss), ...] のリスト
+        
+    Returns:
+        list: [(step, averaged_train_loss), ...] のリスト（eval stepと同じタイミング）
+    """
+    if not eval_data or not train_data:
+        return []
+    
+    eval_steps = [x[0] for x in eval_data]
+    averaged_train_data = []
+    
+    prev_eval_step = 0
+    for eval_step in eval_steps:
+        # 前回のeval_stepから現在のeval_stepまでのtrain lossを抽出
+        interval_train_losses = [
+            loss for step, loss in train_data 
+            if prev_eval_step < step <= eval_step
+        ]
+        
+        if interval_train_losses:
+            avg_loss = sum(interval_train_losses) / len(interval_train_losses)
+            averaged_train_data.append((eval_step, avg_loss))
+        
+        prev_eval_step = eval_step
+    
+    return averaged_train_data
+
+
 def plot_losses(train_data, eval_data, output_path):
     """
     train_lossとeval_lossのグラフを描画して保存する
     
     Args:
-        train_data: [(step, train_loss), ...] のリスト
+        train_data: [(step, averaged_train_loss), ...] のリスト（eval stepと同じタイミングで平均化済み）
         eval_data: [(step, eval_loss), ...] のリスト
         output_path: 出力ファイルのパス
     """
@@ -69,12 +103,12 @@ def plot_losses(train_data, eval_data, output_path):
     
     plt.figure(figsize=(14, 7))
     
-    # train lossのプロット
+    # train lossのプロット（平均化済み）
     if train_data:
         train_steps = [x[0] for x in train_data]
         train_losses = [x[1] for x in train_data]
-        plt.plot(train_steps, train_losses, marker='o', linestyle='-', markersize=2, 
-                linewidth=1.5, label='Train Loss', color='blue', alpha=0.7)
+        plt.plot(train_steps, train_losses, marker='o', linestyle='-', markersize=3, 
+                linewidth=1.5, label='Train Loss (averaged)', color='blue', alpha=0.8)
     
     # eval lossのプロット
     if eval_data:
@@ -146,7 +180,10 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
     
     # train_lossとeval_lossデータの読み込み
-    train_data, eval_data = load_losses(args.checkpoint_dir)
+    train_data_raw, eval_data = load_losses(args.checkpoint_dir)
+    
+    # train lossをeval stepと同じタイミングで平均化
+    train_data = average_train_loss_by_eval_steps(train_data_raw, eval_data)
     
     # グラフの描画と保存
     plot_losses(train_data, eval_data, args.output)
