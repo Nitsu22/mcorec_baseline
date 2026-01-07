@@ -4,11 +4,13 @@ import argparse
 import json
 import math
 import glob
+import numpy as np
 from abc import ABC, abstractmethod
 from tqdm import tqdm
 import torch
 import torchvision
 import torchaudio
+from collections import OrderedDict
 
 # Add src to path
 os.sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__))))
@@ -203,12 +205,16 @@ class MuAViCModel(BaseInferenceModel):
 class InferenceEngine:
     """Main inference engine that handles model selection and processing"""
     
-    def __init__(self, model_type: str, checkpoint_path=None, cache_dir=None, beam_size=3, max_length=15):
+    def __init__(self, model_type: str, checkpoint_path=None, cache_dir=None, beam_size=3, max_length=15, 
+                 tse_checkpoint_path=None, use_tse=True):
         self.model_type = model_type
         self.checkpoint_path = checkpoint_path
         self.cache_dir = cache_dir
         self.beam_size = beam_size
         self.max_length = max_length
+        self.tse_checkpoint_path = tse_checkpoint_path
+        self.use_tse = use_tse
+        self.tse_model = None
         self.model_impl = self._get_model_implementation()
         
     def _get_model_implementation(self) -> BaseInferenceModel:
@@ -227,6 +233,136 @@ class InferenceEngine:
         print(f"Loading {self.model_type} model...")
         self.model_impl.load_model()
         print(f"{self.model_type} model loaded successfully!")
+        
+        # Load AV-TSE model if enabled
+        if self.use_tse:
+            self.load_tse_model()
+    
+    def load_tse_model(self):
+        """Load AV-TSE (Target Speaker Extraction) model"""
+        from src.tse.model.seanet import seanet
+        
+        if self.tse_checkpoint_path is None:
+            self.tse_checkpoint_path = "/net/midgar/work/nitsu/work/chime9/SEANet/configs/exps/seanet_chime9_mixit_all_half_ft_plusnull_max8_2/model/model_0147.model"
+        
+        print(f"Loading AV-TSE model from {self.tse_checkpoint_path}")
+        self.tse_model = seanet(256, 40, 64, 128, 100, 6).cuda()
+        
+        # Load checkpoint
+        selfState = self.tse_model.state_dict()
+        loadedState = torch.load(self.tse_checkpoint_path, map_location='cuda')
+        for name, param in loadedState.items():
+            origName = name
+            if name not in selfState:
+                print(f"{origName} is not in the model, skipping...")
+                continue
+            if selfState[name].size() != loadedState[origName].size():
+                print(f"Wrong parameter length: {origName}, model: {selfState[name].size()}, loaded: {loadedState[origName].size()}, skipping...")
+                continue
+            selfState[name].copy_(param)
+        
+        self.tse_model.eval()
+        print("AV-TSE model loaded successfully!")
+    
+    def load_lip_embedding(self, npy_path, start_time, end_time):
+        """
+        Load lip embedding from .npy file and extract segment
+        
+        Args:
+            npy_path: Path to .npy file containing lip embeddings
+            start_time: Start time in seconds
+            end_time: End time in seconds
+        
+        Returns:
+            lip_embedding: torch.Tensor of shape [1, F, C] where F is number of frames, C is feature dim
+        """
+        if not os.path.exists(npy_path):
+            raise FileNotFoundError(f"Lip embedding file not found: {npy_path}")
+        
+        # Load full lip embedding
+        lip_embedding = np.load(npy_path)  # Shape: [F, C]
+        
+        # Calculate frame indices (25fps)
+        fps = 25.0
+        start_frame = int(start_time * fps)
+        end_frame = int(end_time * fps)
+        
+        # Extract segment
+        lip_segment = lip_embedding[start_frame:end_frame]  # Shape: [F_seg, C]
+        
+        # Convert to torch tensor and add batch dimension
+        lip_tensor = torch.FloatTensor(lip_segment)  # Shape: [F_seg, C]
+        lip_tensor = lip_tensor.unsqueeze(0)  # Shape: [1, F_seg, C]
+        
+        return lip_tensor
+    
+    def load_central_audio(self, central_video_path, start_time, end_time):
+        """
+        Load audio segment from central_video.mp4
+        
+        Args:
+            central_video_path: Path to central_video.mp4
+            start_time: Start time in seconds
+            end_time: End time in seconds
+        
+        Returns:
+            audio: torch.Tensor of shape [1, T] where T is number of samples
+        """
+        from src.dataset.av_dataset import load_audio
+        
+        audio = load_audio(central_video_path, start_time=start_time, end_time=end_time)  # Shape: [T, 1]
+        audio = audio.transpose(0, 1)  # Shape: [1, T]
+        
+        return audio
+    
+    def separate_audio_with_tse(self, mixture_audio, lip_embedding):
+        """
+        Separate audio using AV-TSE model
+        
+        Args:
+            mixture_audio: torch.Tensor of shape [1, T] (mixed audio)
+            lip_embedding: torch.Tensor of shape [1, F, C] (lip embedding)
+        
+        Returns:
+            separated_audio: torch.Tensor of shape [1, T] (separated audio)
+        """
+        if self.tse_model is None:
+            raise RuntimeError("AV-TSE model not loaded. Call load_tse_model() first.")
+        
+        self.tse_model.eval()
+        with torch.no_grad():
+            mixture_audio = mixture_audio.cuda()
+            lip_embedding = lip_embedding.cuda()
+            
+            # SEANet推論方式に準拠: 8セグメントに分割して処理
+            B = 1
+            audio_seg = 8
+            audio_len = mixture_audio.shape[1]
+            face_len = lip_embedding.shape[1]
+            output_segments = []
+            
+            for seg in range(audio_seg):
+                start_audio = seg * (audio_len // audio_seg)
+                start_face = seg * (face_len // audio_seg)
+                if seg < (audio_seg - 1):
+                    end_audio = start_audio + (audio_len // audio_seg)
+                    end_face = start_face + (face_len // audio_seg)
+                else:
+                    end_audio = audio_len
+                    end_face = face_len
+                
+                out_speech, _ = self.tse_model(
+                    mixture_audio[:, start_audio:end_audio], 
+                    lip_embedding[:, start_face:end_face, :], 
+                    B
+                )
+                out = out_speech[-B:, :]  # Shape: [1, T_seg]
+                output_segments.append(out)
+            
+            # Concatenate segments
+            separated_audio = torch.cat(output_segments, dim=1)  # Shape: [1, T]
+        
+        return separated_audio
     
     def chunk_video(self, video_path, asd_path=None, max_length=15):
         """Split video into chunks for inference"""
@@ -271,23 +407,76 @@ class InferenceEngine:
         milliseconds = int((timestamp - int(timestamp)) * 1000)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
     
-    def infer_video(self, video_path, asd_path=None, offset=0., desc=None):
-        """Perform inference on a video file"""
+    def infer_video(self, video_path, asd_path=None, offset=0., desc=None, 
+                    central_video_path=None, lip_embedding_path=None):
+        """
+        Perform inference on a video file
+        
+        Args:
+            video_path: Path to lip video file (used for video features)
+            asd_path: Path to ASD JSON file (optional)
+            offset: Time offset for output timestamps
+            desc: Description for progress bar
+            central_video_path: Path to central_video.mp4 (for mixed audio, required if use_tse=True)
+            lip_embedding_path: Path to lip embedding .npy file (required if use_tse=True)
+        """
         segments = self.chunk_video(video_path, asd_path, max_length=self.max_length)
         segment_output = []
         
         for seg in tqdm(segments, desc="Processing segments" if desc is None else desc, total=len(segments)):
-            # Prepare sample
+            # Prepare sample for video (always use lip video for visual features)
             sample = {
                 "video": video_path,
                 "start_time": seg[0],
                 "end_time": seg[1],
             }
             sample_features = self.model_impl.av_data_collator([sample])
-            audios = sample_features["audios"].cuda()
             videos = sample_features["videos"].cuda()
-            audio_lengths = sample_features["audio_lengths"].cuda()
             video_lengths = sample_features["video_lengths"].cuda()
+            
+            # Handle audio: use AV-TSE separated audio if enabled, otherwise use original
+            if self.use_tse and self.tse_model is not None:
+                if central_video_path is None or lip_embedding_path is None:
+                    raise ValueError("central_video_path and lip_embedding_path are required when use_tse=True")
+                
+                # Convert track-relative time to session-absolute time for central_video.mp4
+                # seg[0] and seg[1] are relative to track start, so add offset (track_start_time)
+                session_start_time = seg[0] + offset
+                session_end_time = seg[1] + offset
+                
+                # Load mixed audio from central_video.mp4 (using session-absolute time)
+                mixture_audio = self.load_central_audio(central_video_path, session_start_time, session_end_time)
+                
+                # Load lip embedding segment (track-relative time)
+                lip_embedding = self.load_lip_embedding(lip_embedding_path, seg[0], seg[1])
+                
+                # Separate audio using AV-TSE
+                separated_audio = self.separate_audio_with_tse(mixture_audio, lip_embedding)
+                
+                # Convert separated audio to format expected by AV-ASR
+                # separated_audio shape: [1, T]
+                # AV-ASR expects: [T, 1] for processing, then collated to [B, T, 1]
+                separated_audio_t = separated_audio.squeeze(0).transpose(0, 1)  # [1, T] -> [T, 1]
+                
+                # Ensure length matches video
+                from src.dataset.av_dataset import cut_or_pad
+                video_frames = videos.shape[1]
+                rate_ratio = 640  # 1 frame = 640 samples at 25fps, 16000Hz
+                expected_audio_len = video_frames * rate_ratio
+                separated_audio_t = cut_or_pad(separated_audio_t, expected_audio_len, dim=0)
+                
+                # Apply audio transform (same as DataCollator does)
+                from src.dataset.av_dataset import AudioTransform
+                audio_transform = AudioTransform(subset="test")
+                separated_audio_t = audio_transform(separated_audio_t)  # Shape: [T, 1]
+                
+                # Prepare for AV-ASR: add batch dimension and move to GPU
+                audios = separated_audio_t.unsqueeze(0).cuda()  # [1, T, 1]
+                audio_lengths = torch.tensor([separated_audio_t.shape[0]], dtype=torch.long).cuda()
+            else:
+                # Use original audio (no AV-TSE)
+                audios = sample_features["audios"].cuda()
+                audio_lengths = sample_features["audio_lengths"].cuda()
             
             try:
                 output = self.model_impl.inference(videos, audios)
@@ -299,6 +488,8 @@ class InferenceEngine:
 
             # GPU Memory Cleanup
             del audios, videos, audio_lengths, video_lengths, sample_features
+            if self.use_tse and self.tse_model is not None:
+                del mixture_audio, lip_embedding, separated_audio, separated_audio_t
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
@@ -333,6 +524,9 @@ class InferenceEngine:
         with open(output_clusters_file, "w") as f:
             json.dump(clusters, f, indent=4)    
         
+        # Get central_video.mp4 path
+        central_video_path = os.path.join(session_dir, "central_video.mp4")
+        
         # Process speaker transcripts
         for speaker_name, speaker_data in tqdm(metadata.items(), desc="Processing speakers", total=len(metadata)):
             print()
@@ -340,10 +534,30 @@ class InferenceEngine:
             for idx, track in enumerate(speaker_data['central']['crops']):
                 video_path = os.path.join(session_dir, track['lip'])
                 asd_path = os.path.join(session_dir, track['asd']) if 'asd' in track else None
+                
+                # Get lip embedding path (.npy file)
+                # track['lip'] is like "speakers/spk_0/central_crops/track_00_lip.av.mp4"
+                # lip embedding is at "speakers/spk_0/central_crops/track_00_lip.av.npy"
+                lip_embedding_path = None
+                if self.use_tse:
+                    lip_path = track['lip']
+                    if lip_path.endswith('.mp4'):
+                        lip_embedding_path = lip_path.replace('.mp4', '.npy')
+                    else:
+                        lip_embedding_path = lip_path + '.npy'
+                    lip_embedding_path = os.path.join(session_dir, lip_embedding_path)
+                
                 with open(os.path.join(session_dir, track['crop_metadata']), "r") as f:
                     crop_metadata = json.load(f)
                 track_start_time = crop_metadata['start_time']
-                hypotheses = self.infer_video(video_path, asd_path, offset=track_start_time, desc=f"Processing speaker {speaker_name} track {idx+1} of {len(speaker_data['central']['crops'])}")
+                hypotheses = self.infer_video(
+                    video_path, 
+                    asd_path, 
+                    offset=track_start_time, 
+                    desc=f"Processing speaker {speaker_name} track {idx+1} of {len(speaker_data['central']['crops'])}",
+                    central_video_path=central_video_path if self.use_tse else None,
+                    lip_embedding_path=lip_embedding_path if self.use_tse else None
+                )
                 speaker_track_hypotheses.extend(hypotheses)
 
                 # GPU Memory Cleanup after each track
@@ -424,10 +638,40 @@ def main():
         help='Name of the output directory within each session (default: output)'
     )
     
+    # AV-TSE arguments
+    parser.add_argument(
+        '--tse_checkpoint_path',
+        type=str,
+        default=None,
+        help='Path to AV-TSE model checkpoint (default: uses default SEANet checkpoint)'
+    )
+    
+    parser.add_argument(
+        '--use_tse',
+        action='store_true',
+        default=True,
+        help='Use AV-TSE for audio separation before AV-ASR (default: True)'
+    )
+    
+    parser.add_argument(
+        '--no_tse',
+        dest='use_tse',
+        action='store_false',
+        help='Disable AV-TSE (use original audio directly)'
+    )
+    
     args = parser.parse_args()
     
     # Initialize inference engine
-    engine = InferenceEngine(args.model_type, args.checkpoint_path, args.cache_dir, args.beam_size, args.max_length)
+    engine = InferenceEngine(
+        args.model_type, 
+        args.checkpoint_path, 
+        args.cache_dir, 
+        args.beam_size, 
+        args.max_length,
+        tse_checkpoint_path=args.tse_checkpoint_path,
+        use_tse=args.use_tse
+    )
     engine.load_model()
     
     # Process session directories
