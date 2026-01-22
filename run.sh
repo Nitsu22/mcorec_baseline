@@ -6,7 +6,7 @@ export OMP_NUM_THREADS=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # 学習実行
-torchrun --nproc_per_node 4 script/train_face.py \
+torchrun --nproc_per_node 4 script/train.py \
     --streaming_dataset \
     --include_mcorec \
     --batch_size 6 \
@@ -16,6 +16,6 @@ torchrun --nproc_per_node 4 script/train_face.py \
     --eval_steps 2000 \
     --learning_rate 1e-4 \
     --warmup_steps 4000 \
-    --checkpoint_name mcorec_finetuning_face \
+    --checkpoint_name mcorec_finetuning \
     --model_name_or_path ./model-bin/avsr_cocktail \
     --output_dir ./model-bin

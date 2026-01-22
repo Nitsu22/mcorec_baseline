@@ -115,40 +115,6 @@ class FBanksAndStack(torch.nn.Module):
             audio_feats = F.layer_norm(torch.from_numpy(audio_feats), audio_feats.shape[1:])
         return audio_feats
 
-
-class TorchFBanksAndStack(torch.nn.Module):
-    def __init__(self, stack_order=4, sample_rate=16000, num_mel_bins=26):
-        super().__init__()
-        self.stack_order = stack_order
-        self.sample_rate = sample_rate
-        self.num_mel_bins = num_mel_bins
-
-    def stacker(self, feats):
-        feat_dim = feats.shape[1]
-        if feats.shape[0] % self.stack_order != 0:
-            pad_len = self.stack_order - (feats.shape[0] % self.stack_order)
-            pad = feats.new_zeros((pad_len, feat_dim))
-            feats = torch.cat([feats, pad], dim=0)
-        feats = feats.reshape(-1, self.stack_order, feat_dim).reshape(-1, self.stack_order * feat_dim)
-        return feats
-
-    def forward(self, x):
-        if x.dim() == 2:
-            x = x.squeeze(1)
-        x = x.float()
-        feats = torchaudio.compliance.kaldi.fbank(
-            x.unsqueeze(0),
-            sample_frequency=self.sample_rate,
-            num_mel_bins=self.num_mel_bins,
-            frame_length=25.0,
-            frame_shift=10.0,
-            dither=0.0,
-            use_energy=False,
-        )
-        feats = self.stacker(feats)
-        feats = F.layer_norm(feats, feats.shape[1:])
-        return feats
-
 def normalize_audio(waveform):
     max_val = torch.abs(waveform).max()
     return waveform / max_val if max_val > 0 else waveform
@@ -221,7 +187,10 @@ class AddMultiSpk(torch.nn.Module):
     ):
         super().__init__()
         self.snr_levels = [snr_target] if snr_target else [-5, 0, 5, 10, 15, 20]
-        self.interferer_spk = [interferer_spk] if interferer_spk else [0, 0, 1, 2]
+        # self.interferer_spk = [interferer_spk] if interferer_spk else [0, 0, 1, 2, 3, 4]
+        # self.interferer_spk = [0, 0, 1, 2, 3, 4, 5, 6]
+        # self.interferer_spk = [0, 0, 1, 2, 3, 4]
+        self.interferer_spk = [0, 0, 1, 2]
         self.speech_dataset = speech_dataset
 
     def forward(self, speech):
@@ -234,6 +203,7 @@ class AddMultiSpk(torch.nn.Module):
             return speech
         
         num_interferer = random.choice(self.interferer_spk)
+        # print(num_interferer)
         interferer_signal = None
         for _ in range(num_interferer):
             interferer = load_audio(random.choice(self.speech_dataset)['video'])
@@ -282,12 +252,13 @@ class VideoTransform:
 
 class AudioTransform:
     def __init__(self, subset, speech_dataset=None, snr_target=None):
+        # self.audio_pipeline_label = None
         if subset == "train":
             self.audio_pipeline = torch.nn.Sequential(
                 AdaptiveTimeMask(6400, 16000),
                 AddMultiSpk(speech_dataset=speech_dataset),
                 AddNoise(),
-                FBanksAndStack(),
+                # FBanksAndStack(),
                 # FunctionalModule(
                 #     lambda x: torch.nn.functional.layer_norm(x, x.shape, eps=1e-8)
                 # ),
@@ -297,36 +268,22 @@ class AudioTransform:
                 AddNoise(snr_target=snr_target)
                 if snr_target is not None
                 else FunctionalModule(lambda x: x),
-                FBanksAndStack(),
-                # FunctionalModule(
-                #     lambda x: torch.nn.functional.layer_norm(x, x.shape, eps=1e-8)
-                # ),
+                # FBanksAndStack(),
             )
+        self.audio_pipeline_fbank = torch.nn.Sequential(
+            FBanksAndStack(),
+        )
 
-    def __call__(self, sample):
+    def __call__(self, sample, label_sample=None):
         # sample: T x 1
         # rtype: T x 1
-        return self.audio_pipeline(sample)
-
-
-class AudioWaveTransform:
-    def __init__(self, subset, speech_dataset=None, snr_target=None):
-        if subset == "train":
-            self.audio_pipeline = torch.nn.Sequential(
-                AdaptiveTimeMask(6400, 16000),
-                AddMultiSpk(speech_dataset=speech_dataset),
-                AddNoise(),
-                FunctionalModule(lambda x: x),
-            )
-        elif subset == "val" or subset == "test":
-            self.audio_pipeline = torch.nn.Sequential(
-                AddNoise(snr_target=snr_target)
-                if snr_target is not None
-                else FunctionalModule(lambda x: x),
-            )
-
-    def __call__(self, sample):
-        return self.audio_pipeline(sample)
+        # return self.audio_pipeline(sample)
+        if (label_sample is not None):
+            audio = self.audio_pipeline(sample)
+            noise = audio - label_sample
+            return self.audio_pipeline_fbank(audio), self.audio_pipeline_fbank(label_sample), self.audio_pipeline_fbank(noise)
+        else:
+            return self.audio_pipeline_fbank(self.audio_pipeline(sample))
 
 
 
@@ -383,17 +340,33 @@ class DataCollator:
 
             if "start_time" in feature and "end_time" in feature:
                 audio = load_audio(feature["video"], feature["start_time"], feature["end_time"])
+                # audio2 = load_audio(feature["audio"], feature["start_time"], feature["end_time"])
+                # audio = torch.add(audio, audio2, alpha=0.5)
+                # audio = load_audio(feature["audio"], feature["start_time"], feature["end_time"])
             else:
                 audio = load_audio(feature["video"])
+                # audio2 = load_audio(feature["audio"])
+                # audio = torch.add(audio, audio2, alpha=0.5)
+                # audio = load_audio(feature["audio"])
                 
-            audio = cut_or_pad(audio, len(video) * self.rate_ratio)
-            
+            label_audio = cut_or_pad(audio, len(video) * self.rate_ratio)
+            # print(label_audio.shape)
+
             video = self.video_transform(video)
-            audio = self.audio_transform(audio)
+            audio_transform_outputs = self.audio_transform(label_audio, label_sample=label_audio)
+            if len(audio_transform_outputs) == 3:
+                audio, label_audio, label_noise = audio_transform_outputs
+            else:
+                label_noise = None
+                audio = audio_transform_outputs
 
             if "label" in feature:
                 label = self.text_transform.tokenize(feature["label"])
-                samples.append({"video": video, "audio": audio, "label": label})
+                # samples.append({"video": video, "audio": audio, "label": label})
+                if label_noise is None:
+                    samples.append({"video": video, "audio": audio, "label": label})
+                else:
+                    samples.append({"video": video, "audio": audio, "label": label, "label_audio": label_audio, "label_noise": label_noise})
             else:
                 samples.append({"video": video, "audio": audio})
             
@@ -403,89 +376,8 @@ class DataCollator:
         
         batch['videos'] = batch['videos'].permute(0, 2, 1, 3, 4)
         batch['audios'] = batch['audios'].permute(0, 2, 1)
+        if 'label_audios' in batch:
+            batch['label_audios'] = batch['label_audios'].permute(0, 2, 1)
+            batch['label_noises'] = batch['label_noises'].permute(0, 2, 1)
         
-        return batch
-
-
-@dataclass
-class SEANetDataCollator:
-    text_transform: TextTransform = None
-    video_transform: VideoTransform = None
-    audio_transform: AudioTransform = None
-    audio_wave_transform: AudioWaveTransform = None
-    muse_cache: Any = None
-    seanet_scope: str = "all"
-    rate_ratio: int = 640
-
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        samples = []
-        audio_wavs = []
-        audio_wav_lengths = []
-        muse_feats = []
-        muse_lengths = []
-        use_seanet_mask = []
-
-        for feature in features:
-            if "start_time" in feature and "end_time" in feature:
-                video = load_video(feature["video"], feature["start_time"], feature["end_time"])
-                audio = load_audio(feature["video"], feature["start_time"], feature["end_time"])
-                start_time = feature["start_time"]
-                end_time = feature["end_time"]
-            else:
-                video = load_video(feature["video"])
-                audio = load_audio(feature["video"])
-                start_time = None
-                end_time = None
-
-            audio = cut_or_pad(audio, len(video) * self.rate_ratio)
-            video = self.video_transform(video)
-            audio_feat = self.audio_transform(audio)
-
-            dataset_name = feature.get("dataset_name", "")
-            if isinstance(dataset_name, bytes):
-                dataset_name = dataset_name.decode("utf-8")
-            use_seanet = self.seanet_scope == "all" or dataset_name == "mcorec"
-
-            if use_seanet:
-                if self.muse_cache is None:
-                    raise ValueError("muse_cache must be provided when use_seanet is enabled")
-                if self.audio_wave_transform is None:
-                    raise ValueError("audio_wave_transform must be provided when use_seanet is enabled")
-                audio_wave = self.audio_wave_transform(audio)
-                audio_wave = cut_or_pad(audio_wave, len(video) * self.rate_ratio)
-                muse = self.muse_cache.load(feature["video"], start_time, end_time)
-                if muse.shape[0] != len(video):
-                    raise ValueError(
-                        f"MuSE feature length mismatch: video_len={len(video)}, muse_len={muse.shape[0]}, video={feature['video']}"
-                    )
-                audio_wav_lengths.append(len(audio_wave))
-                muse_lengths.append(muse.shape[0])
-                audio_wavs.append(audio_wave)
-                muse_feats.append(torch.from_numpy(muse))
-            else:
-                audio_wav_lengths.append(0)
-                muse_lengths.append(0)
-                audio_wavs.append(audio.new_zeros((1, 1)))
-                muse_feats.append(audio.new_zeros((1, 512)))
-
-            use_seanet_mask.append(use_seanet)
-
-            if "label" in feature:
-                label = self.text_transform.tokenize(feature["label"])
-                samples.append({"video": video, "audio": audio_feat, "label": label})
-            else:
-                samples.append({"video": video, "audio": audio_feat})
-
-        batch = collate_pad(samples)
-        audio_wavs_batch, _ = pad(audio_wavs)
-        muse_batch, _ = pad(muse_feats)
-
-        batch["videos"] = batch["videos"].permute(0, 2, 1, 3, 4)
-        batch["audios"] = batch["audios"].permute(0, 2, 1)
-        batch["audio_wavs"] = audio_wavs_batch.permute(0, 2, 1)
-        batch["audio_wav_lengths"] = torch.tensor(audio_wav_lengths)
-        batch["muse_features"] = muse_batch
-        batch["muse_feature_lengths"] = torch.tensor(muse_lengths)
-        batch["use_seanet_mask"] = torch.tensor(use_seanet_mask)
-
         return batch

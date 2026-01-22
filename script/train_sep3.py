@@ -3,23 +3,10 @@ import sys
 os.sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__))))
 import torch
 from datasets import load_from_disk
-from src.dataset.avhubert_dataset import (
-    load_audio,
-    load_video,
-    cut_or_pad,
-    AudioTransform,
-    AudioWaveTransform,
-    VideoTransform,
-    DataCollator,
-    SEANetDataCollator,
-    TorchFBanksAndStack,
-)
+from src.dataset.avhubert_dataset_sep import load_audio, load_video, cut_or_pad, AudioTransform, VideoTransform, DataCollator
 from src.tokenizer.spm_tokenizer import TextTransform
-from src.avhubert_avsr.avhubert_avsr_model import AVHubertAVSR, get_beam_search_decoder
-from src.avhubert_avsr.avhubert_avsr_seanet import AVHubertAVSRSEANet
+from src.avhubert_avsr.avhubert_avsr_model_sep2 import AVHubertAVSR, get_beam_search_decoder
 from src.avhubert_avsr.configuration_avhubert_avsr import AVHubertAVSRConfig
-from src.muse.visual_frontend_cache import MuSEFeatureCache
-from src.seanet_wrapper import build_seanet
 from transformers import TrainingArguments
 from src.custom_trainer import AVSRTrainer
 from transformers.trainer_utils import IntervalStrategy
@@ -58,8 +45,6 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
         sample['label'] = str(sample['label'], encoding='utf-8')
         sample['length'] = int(sample['length'])
         sample['sample_id'] = str(sample['sample_id'], encoding='utf-8')
-        if "dataset_name" in sample and isinstance(sample["dataset_name"], bytes):
-            sample["dataset_name"] = str(sample["dataset_name"], encoding="utf-8")
         return sample
     
     # Load dataset
@@ -67,21 +52,33 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
     try_times = 0
     max_try_times = 5
 
-    def add_dataset_name(sample, dataset_name):
-        sample["dataset_name"] = dataset_name
-        return sample
-
     while not finished_loading:
         try:
             # Load dataset. It's quite bigdataset and sometime downloading can break. You can simple retry.
-            lrs2 = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
-            vox2 = datasets.load_dataset("nguyenvulebinh/AVYT", "vox2", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
-            avyt = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
-            avyt_mix = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt-mix", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+            lrs2 = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", streaming=streaming, data_files={
+                "train": "/net/bull/work1/chime-9/lrs2/lrs2-train-*.tar",
+                "pretrain": "/net/bull/work1/chime-9/lrs2/lrs2-pretrain-*.tar",
+                "valid": "/net/bull/work1/chime-9/lrs2/lrs2-valid-*.tar",
+                "test_snr_0_interferer_2": "/net/bull/work1/chime-9/lrs2/lrs2-test_snr_0_interferer_2-*.tar",
+            }).remove_columns(['__key__', '__url__'])
+            vox2 = datasets.load_dataset("nguyenvulebinh/AVYT", "vox2", streaming=streaming, data_files={
+                "dev": "/net/bull/work1/chime-9/vox2/vox2-dev-*.tar",
+            }).remove_columns(['__key__', '__url__'])
+            avyt = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt", streaming=streaming, data_files={
+                "talking": "/net/bull/work1/chime-9/avyt/talking-*.tar",
+                "silent":  "/net/bull/work1/chime-9/avyt/silent-*.tar",
+            }).remove_columns(['__key__', '__url__'])
+            avyt_mix = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt-mix", streaming=streaming, data_files={
+                "train": "/net/bull/work1/chime-9/dialog/dialog-train-*.tar",
+                "test":  "/net/bull/work1/chime-9/dialog/dialog-test-*.tar",
+            }).remove_columns(['__key__', '__url__'])
             # Load mcorec dataset. Ensure you have permission to use this dataset.
             if include_mcorec:
                 print("Loading MCoRec dataset")
-                mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, cache_dir=cache_dir).remove_columns(['__key__', '__url__'])
+                mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, data_files={
+                    "train": "/net/bull/work3/backup/chime-9/processed/mcorec-train-*.tar",
+                    "valid":  "/net/bull/work3/backup/chime-9/processed/mcorec-valid-*.tar",
+                }).remove_columns(['__key__', '__url__'])
             finished_loading = True
         except Exception as e:
             try_times += 1
@@ -89,18 +86,6 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
                 raise e
             time.sleep(10)
     
-    for split in lrs2.keys():
-        lrs2[split] = lrs2[split].map(add_dataset_name, fn_kwargs={"dataset_name": "lrs2"})
-    for split in vox2.keys():
-        vox2[split] = vox2[split].map(add_dataset_name, fn_kwargs={"dataset_name": "vox2"})
-    for split in avyt.keys():
-        avyt[split] = avyt[split].map(add_dataset_name, fn_kwargs={"dataset_name": "avyt"})
-    for split in avyt_mix.keys():
-        avyt_mix[split] = avyt_mix[split].map(add_dataset_name, fn_kwargs={"dataset_name": "avyt-mix"})
-    if include_mcorec:
-        for split in mcorec_dataset.keys():
-            mcorec_dataset[split] = mcorec_dataset[split].map(add_dataset_name, fn_kwargs={"dataset_name": "mcorec"})
-
     if not streaming:
         # That mean above datasets are already downloaded and cached
         list_datasets = [lrs2, vox2, avyt, avyt_mix]
@@ -193,7 +178,7 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
     # load lrs2 for interference speech
     # interference_speech = None
     print("Loading interference speech dataset. Actual file around 10GB need to download. This may take a while...")
-    interference_speech = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", cache_dir=cache_dir, data_files='lrs2/lrs2-train-*.tar').remove_columns(['__key__', '__url__'])['train']
+    interference_speech = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", cache_dir=cache_dir, data_files='/net/bull/work1/chime-9/lrs2/lrs2-train-*.tar').remove_columns(['__key__', '__url__'])['train']
     return train_dataset, valid_dataset, interference_speech
 
 
@@ -210,26 +195,15 @@ if __name__ == "__main__":
     parser.add_argument("--eval_steps", type=int, default=2000)
     parser.add_argument("--log_interval", type=int, default=25)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--warmup_steps", type=int, default=4000)
+    # parser.add_argument("--warmup_steps", type=int, default=4000)
+    parser.add_argument("--warmup_steps", type=int, default=0)
     parser.add_argument("--resume_from_checkpoint", action="store_true", default=False)
     parser.add_argument("--checkpoint_name", type=str, default="mcorec_finetuning")
-    parser.add_argument("--model_name_or_path", type=str, default="./model-bin/avsr_cocktail") # Or None to train from scratch
+    # parser.add_argument("--model_name_or_path", type=str, default="./model-bin/avsr_cocktail") # Or None to train from scratch
+    parser.add_argument("--model_name_or_path", type=str, default="") # Or None to train from scratch
     parser.add_argument("--report_to", type=str, default="none") # wandb or none
     parser.add_argument("--output_dir", type=str, default=os.path.join(os.path.dirname(os.path.dirname(__file__)), f"model-bin"))
-    parser.add_argument("--use_seanet", action="store_true", default=False)
-    parser.add_argument("--seanet_scope", type=str, choices=["all", "mcorec"], default="all")
-    parser.add_argument("--freeze_seanet", action="store_true", default=False)
-    parser.add_argument("--freeze_avhubert", action="store_true", default=False)
-    parser.add_argument(
-        "--seanet_checkpoint",
-        type=str,
-        default="/net/midgar/work/nitsu/work/chime9/SEANet/exps/seanet/model/model_0147.model",
-    )
-    parser.add_argument(
-        "--muse_cache_dir",
-        type=str,
-        default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "data-bin/cache/muse_lip"),
-    )
+    parser.add_argument("--bf16", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -248,15 +222,6 @@ if __name__ == "__main__":
     model_name_or_path = args.model_name_or_path # Or None to train from scratch
     output_dir = os.path.join(args.output_dir, checkpoint_name)
     report_to = args.report_to
-    use_seanet = True if args.use_seanet else False
-    seanet_scope = args.seanet_scope
-    freeze_seanet = True if args.freeze_seanet else False
-    freeze_avhubert = True if args.freeze_avhubert else False
-    seanet_checkpoint = args.seanet_checkpoint
-    muse_cache_dir = args.muse_cache_dir
-
-    if use_seanet and streaming_dataset:
-        raise ValueError("SEANet requires --streaming_dataset to be disabled (streaming=False).")
     
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -274,19 +239,15 @@ if __name__ == "__main__":
     # Load from pretrained checkpoint
     if model_name_or_path is not None and os.path.exists(model_name_or_path):
         print("Loading pretrained model from", model_name_or_path)
-        if use_seanet:
-            avsr_model = AVHubertAVSRSEANet.from_pretrained(model_name_or_path)
-        else:
-            avsr_model = AVHubertAVSR.from_pretrained(model_name_or_path)
+        avsr_model = AVHubertAVSR.from_pretrained(model_name_or_path)
     else:
         # Load from scratch
         print("Loading model from scratch")
         avsr_config = AVHubertAVSRConfig(odim=len(text_transform.token_list))
-        if use_seanet:
-            avsr_model = AVHubertAVSRSEANet(avsr_config)
-        else:
-            avsr_model = AVHubertAVSR(avsr_config)
+        avsr_model = AVHubertAVSR(avsr_config)
         
+        for param in avsr_model.avsr.encoder.parameters():
+            param.requires_grad = False
         # Load pretrained encoder checkpoint
         encoder_pretrained_checkpoint = "nguyenvulebinh/avhubert_encoder_large_noise_pt_noise_ft_433h" # AVHubert encoder original (https://facebookresearch.github.io/av_hubert/)
         print("Loading pretrained encoder from", encoder_pretrained_checkpoint)
@@ -296,51 +257,37 @@ if __name__ == "__main__":
         )
         avsr_model.avsr.encoder.load_state_dict(encoder_pretrained.state_dict())
 
-    if use_seanet:
-        if not os.path.exists(seanet_checkpoint):
-            raise FileNotFoundError(f"SEANet checkpoint not found: {seanet_checkpoint}")
-        seanet_model = build_seanet(seanet_checkpoint)
-        fbank_extractor = TorchFBanksAndStack()
-        avsr_model.configure_seanet(
-            seanet_model=seanet_model,
-            fbank_extractor=fbank_extractor,
-            rate_ratio=640,
-            freeze_seanet=freeze_seanet,
-            freeze_avhubert=freeze_avhubert,
-        )
+        # TODO Freeze backbone params
+        # print('Freeze backbone')
+    # avsr_model.avsr.separator.apply(lambda m: m.reset_parameters()
+    #     if hasattr(m, "reset_parameters") else None)
+    avsr_model.avsr.separator = avsr_model.avsr.separator.float()
     
+    # TRAIN ALL PARAMS
+    # for param in avsr_model.avsr.encoder.parameters():
+    #     param.requires_grad = False
+    # for param in avsr_model.avsr.decoder.parameters():
+    #     param.requires_grad = False
+    # for param in avsr_model.avsr.ctc.parameters():
+    #     param.requires_grad = False
+    
+    # for param in avsr_model.avsr.separator.parameters():
+    #     param.requires_grad = False
+    
+
     # Load dataset
     train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(streaming=streaming_dataset, include_mcorec=include_mcorec)
         
-    if use_seanet:
-        muse_cache = MuSEFeatureCache(muse_cache_dir)
-        train_av_data_collator = SEANetDataCollator(
-            text_transform=text_transform,
-            audio_transform=AudioTransform(subset="train", speech_dataset=interference_dataset),
-            audio_wave_transform=AudioWaveTransform(subset="train", speech_dataset=interference_dataset),
-            video_transform=VideoTransform(subset="train"),
-            muse_cache=muse_cache,
-            seanet_scope=seanet_scope,
-        )
-        valid_av_data_collator = SEANetDataCollator(
-            text_transform=text_transform,
-            audio_transform=AudioTransform(subset="test"),
-            audio_wave_transform=AudioWaveTransform(subset="test"),
-            video_transform=VideoTransform(subset="test"),
-            muse_cache=muse_cache,
-            seanet_scope=seanet_scope,
-        )
-    else:
-        train_av_data_collator = DataCollator(
-            text_transform=text_transform,
-            audio_transform=AudioTransform(subset="train", speech_dataset=interference_dataset),
-            video_transform=VideoTransform(subset="train"),
-        )
-        valid_av_data_collator = DataCollator(
-            text_transform=text_transform,
-            audio_transform=AudioTransform(subset="test"),
-            video_transform=VideoTransform(subset="test"),
-        )
+    train_av_data_collator = DataCollator(
+        text_transform=text_transform,
+        audio_transform=AudioTransform(subset="train", speech_dataset=interference_dataset),
+        video_transform=VideoTransform(subset="train"),
+    )
+    valid_av_data_collator = DataCollator(
+        text_transform=text_transform,
+        audio_transform=AudioTransform(subset="test"),
+        video_transform=VideoTransform(subset="test"),
+    )
     
     
     print("train_dataset\n", train_dataset)
@@ -353,7 +300,8 @@ if __name__ == "__main__":
         logging_dir=os.path.join(output_dir, "log"),
         # group_by_length=True,
         # length_column_name='length',
-        label_names = ["labels"],
+        label_names = ["labels", "label_audios", "label_noises"],
+        # label_names = ["labels"],
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         # auto_find_batch_size = True,
@@ -364,7 +312,11 @@ if __name__ == "__main__":
         gradient_accumulation_steps=gradient_accumulation_steps,
         metric_for_best_model='loss',
         greater_is_better=False,
-        fp16=True,
+        # fp16=True,
+        # bf16=args.bf16,
+        # fp16=not args.bf16,
+        bf16=False,
+        fp16=False,
         gradient_checkpointing=False, 
         remove_unused_columns=False,
         dataloader_num_workers=10,
