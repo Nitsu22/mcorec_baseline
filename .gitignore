@@ -202,3 +202,5 @@ src/ibug/**/weights/*
 src/ibug/**/weights/*
 
 script/_*.py
+
+trun_*.sh
