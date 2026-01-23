@@ -8,8 +8,8 @@ export CUDA_VISIBLE_DEVICES=0
 # freeze backbone script
 torchrun --nproc_per_node 1 script/train_sep.py \
     --streaming_dataset \
-    --batch_size 3 \
-    --max_steps 400000 \
+    --batch_size 1 \
+    --max_steps 100000 \
     --gradient_accumulation_steps 6 \
     --save_steps 2000 \
     --eval_steps 2000 \
