@@ -15,7 +15,7 @@ torchrun --nproc_per_node 1 script/train_sep.py \
     --eval_steps 2000 \
     --learning_rate 1e-3 \
     --model_name_or_path ./model-bin-phuong/avsr_cocktail \
-    --checkpoint_name mcorec_finetuning_2spk_sep_bs_3_gradacc_6_no_mcorec_lyr1 \
+    --checkpoint_name mcorec_finetuning_sep \
     --output_dir ./model-bin
     #--resume_from_checkpoint
     # --model_name_or_path ./model-bin-phuong/avsr_cocktail \
