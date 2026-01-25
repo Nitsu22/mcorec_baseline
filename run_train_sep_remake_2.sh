@@ -3,10 +3,10 @@
 # Set environment variables for distributed training
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0
 
 # freeze backbone script
-torchrun --nproc_per_node 4 --rdzv-endpoint localhost:29401 script/train_sep.py \
+torchrun --nproc_per_node 1 script/train_sep.py \
     --streaming_dataset \
     --batch_size 1 \
     --max_steps 100000 \
@@ -15,9 +15,8 @@ torchrun --nproc_per_node 4 --rdzv-endpoint localhost:29401 script/train_sep.py 
     --eval_steps 2000 \
     --learning_rate 1e-3 \
     --model_name_or_path ./model-bin-phuong/avsr_cocktail \
-    --checkpoint_name mcorec_finetuning_sep \
-    --output_dir ./model-bin \
-    2>&1 | tee train_sep.log
+    --checkpoint_name mcorec_finetuning_2spk_sep_bs_3_gradacc_6_no_mcorec_lyr1_2 \
+    --output_dir ./model-bin
     #--resume_from_checkpoint
     # --model_name_or_path ./model-bin-phuong/avsr_cocktail \
     # --warmup_steps 4000 \

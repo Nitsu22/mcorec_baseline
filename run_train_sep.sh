@@ -3,12 +3,12 @@
 # Set environment variables for distributed training
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # freeze backbone script
-torchrun --nproc_per_node 1 script/train_sep.py \
+torchrun --nproc_per_node 4 script/train_sep.py \
     --streaming_dataset \
-    --batch_size 1 \
+    --batch_size 4 \
     --max_steps 100000 \
     --gradient_accumulation_steps 6 \
     --save_steps 2000 \

@@ -22,7 +22,7 @@ class RotaryEmbedding(nn.Module):
     def _build_cache(self, seq_len: int, device, dtype):
         t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1)  # [seq_len, dim]
+        emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos()[None, None, :, :]
         sin = emb.sin()[None, None, :, :]
         self._cos_cached = cos.to(dtype=dtype)
@@ -30,7 +30,6 @@ class RotaryEmbedding(nn.Module):
         self._seq_len_cached = seq_len
 
     def rotate_queries_or_keys(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, H, T, D]
         seq_len = x.shape[-2]
         if (
             self._cos_cached is None
@@ -49,10 +48,15 @@ class RotaryEmbedding(nn.Module):
 
 
 class tf_locoformer_separator(nn.Module):
-    """TF-Locoformer separator compatible with seanet_separator interface.
-
-    Input:  mixture_feat [B, T, F] (AV-HuBERT hidden states)
-    Output: est_speech [R*B, T, out_dim], est_noise (zeros, same shape)
+    """TF-Locoformer separator (Small Config) with Direct Mapping.
+    
+    Based on TF-LOCOFORMER (S) configuration:
+    - D (emb_dim) = 96
+    - B (n_layers) = 4
+    - C (ffn_hidden_dim) = 256
+    - K (conv1d_kernel) = 4
+    - H (n_heads) = 4
+    - G (num_groups) = 4
     """
 
     def __init__(
@@ -60,22 +64,23 @@ class tf_locoformer_separator(nn.Module):
         input_dim: int = 1024,
         output_dim: int = 104,
         num_spk: int = 1,
-        n_layers: int = 1,
-        emb_dim: int = 96,
+        # --- Small Model Config ---
+        n_layers: int = 4,          # B=4
+        emb_dim: int = 96,          # D=96
+        ffn_hidden_dim: Union[int, List[int]] = (256, 256), # C=256
+        conv1d_kernel: int = 4,     # K=4
+        n_heads: int = 4,           # H=4
+        num_groups: int = 4,        # G=4
+        # --------------------------
         norm_type: str = "rmsgroupnorm",
-        num_groups: int = 4,
         tf_order: str = "ft",
-        n_heads: int = 1,
         flash_attention: bool = False,
-        attention_dim: int = 96,
+        attention_dim: int = 96, # Typically matches emb_dim
         pos_enc: str = "rope",
         ffn_type: Union[str, List[str]] = ("swiglu_conv1d", "swiglu_conv1d"),
-        ffn_hidden_dim: Union[int, List[int]] = (192, 192),
-        conv1d_kernel: int = 8,
         conv1d_shift: int = 1,
         dropout: float = 0.0,
         eps: float = 1.0e-5,
-        mask_act: str = "sigmoid",
         R: int = 3,
     ):
         super().__init__()
@@ -85,17 +90,18 @@ class tf_locoformer_separator(nn.Module):
         self.output_dim = output_dim
         self.n_layers = n_layers
         self.R = R
-        self.mask_act = mask_act
 
+        # Input Convolution (Encoder equivalent)
         t_ksize = 3
         ks, padding = (t_ksize, 3), (t_ksize // 2, 1)
         self.conv = nn.Sequential(
             nn.Conv2d(1, emb_dim, ks, padding=padding),
-            nn.GroupNorm(1, emb_dim, eps=eps),
+            nn.GroupNorm(1, emb_dim, eps=eps), # Acts as LayerNorm (gLN)
         )
 
         if attention_dim % n_heads != 0:
-            raise ValueError(f"attention_dim must be divisible by n_heads: {attention_dim}, {n_heads}")
+            raise ValueError(f"attention_dim must be divisible by n_heads")
+        
         if pos_enc == "nope":
             rope_freq = rope_time = None
         elif pos_enc == "rope":
@@ -127,10 +133,17 @@ class tf_locoformer_separator(nn.Module):
                 )
             )
 
-        self.mask_head = nn.Conv2d(emb_dim, 1, kernel_size=1)
+        # Output Projection for Mapping (Deconv2D equivalent)
+        # Replacing mask_head (Sigmoid) with direct regression
+        # Using ConvTranspose2d to match the inverse of the input Conv2d logic roughly, 
+        # or simply Conv2d(1x1) to project back to 1 channel.
+        # Since we want to map back to the input feature space:
+        self.output_head = nn.Conv2d(emb_dim, 1, kernel_size=1)
+        
         self.basis_linear = nn.Linear(input_dim, output_dim, bias=False)
 
     def forward(self, mixture_feat: torch.Tensor, M: int = 1):
+        # mixture_feat: [B, T, F]
         if mixture_feat.ndim == 3:
             mix = mixture_feat
             batch = mix.unsqueeze(1)  # [B, 1, T, F]
@@ -145,23 +158,21 @@ class tf_locoformer_separator(nn.Module):
         if mix.shape[-1] != self.input_dim:
             raise ValueError(f"Expected input_dim={self.input_dim}, got {mix.shape[-1]}")
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.cuda.amp.autocast(enabled=True):
             batch = batch.to(torch.float32)
             z = self.conv(batch)  # [B, emb_dim, T, F]
 
         for block in self.blocks:
             z = block(z)
 
-        mask = self.mask_head(z)  # [B, 1, T, F]
-        if self.mask_act == "sigmoid":
-            # Use sigmoid mask (0-1 range)
-            mask = torch.sigmoid(mask)
-        elif self.mask_act == "relu":
-            mask = F.relu(mask)
-        else:
-            raise ValueError(f"Unsupported mask_act: {self.mask_act}")
+        # --- Mapping Output ---
+        # Direct estimation instead of masking
+        est_feat_map = self.output_head(z)  # [B, 1, T, F]
+        est_feat_1024 = est_feat_map.squeeze(1) # [B, T, F]
+        
+        # Note: If your target features are strictly positive, you might want F.relu() here.
+        # For general mapping (e.g., Log-Mel or complex real/imag parts), linear output is correct.
 
-        est_feat_1024 = mix * mask.squeeze(1)  # [B, T, F]
         est_speech = self.basis_linear(est_feat_1024)  # [B, T, out_dim]
 
         if self.R > 1:
@@ -169,6 +180,7 @@ class tf_locoformer_separator(nn.Module):
 
         est_speech = est_speech.transpose(1, 2)  # [R*B, out_dim, T]
         est_noise = est_speech.new_zeros(est_speech.shape)
+        
         return est_speech, est_noise
 
 
@@ -177,16 +189,16 @@ class TFLocoformerBlock(nn.Module):
         self,
         rope_freq,
         rope_time,
-        emb_dim=128,
+        emb_dim=96,
         norm_type="rmsgroupnorm",
         num_groups=4,
         tf_order="ft",
         n_heads=4,
         flash_attention=False,
-        attention_dim=128,
+        attention_dim=96,
         ffn_type=("swiglu_conv1d", "swiglu_conv1d"),
-        ffn_hidden_dim=(192, 192),
-        conv1d_kernel=8,
+        ffn_hidden_dim=(256, 256),
+        conv1d_kernel=4,
         conv1d_shift=1,
         dropout=0.0,
         eps=1.0e-5,
@@ -196,8 +208,6 @@ class TFLocoformerBlock(nn.Module):
         if tf_order not in ["tf", "ft"]:
             raise ValueError(tf_order)
         self.tf_order = tf_order
-        self.conv1d_kernel = conv1d_kernel
-        self.conv1d_shift = conv1d_shift
 
         self.freq_path = LocoformerBlock(
             rope_freq,
@@ -236,18 +246,18 @@ class TFLocoformerBlock(nn.Module):
         return self.frame_freq_process(input)
 
     def freq_frame_process(self, input):
-        output = input.movedim(1, -1)  # [B, T, F, C]
+        output = input.movedim(1, -1)
         output = self.freq_path(output)
 
-        output = output.transpose(1, 2)  # [B, F, T, C]
+        output = output.transpose(1, 2)
         output = self.frame_path(output)
         return output.transpose(-1, 1)
 
     def frame_freq_process(self, input):
-        output = input.transpose(1, -1)  # [B, F, T, C]
+        output = input.transpose(1, -1)
         output = self.frame_path(output)
 
-        output = output.transpose(1, 2)  # [B, T, F, C]
+        output = output.transpose(1, 2)
         output = self.freq_path(output)
         return output.movedim(-1, 1)
 
@@ -256,15 +266,15 @@ class LocoformerBlock(nn.Module):
     def __init__(
         self,
         rope,
-        emb_dim=128,
+        emb_dim=96,
         norm_type="rmsgroupnorm",
         num_groups=4,
         n_heads=4,
         flash_attention=False,
-        attention_dim=128,
+        attention_dim=96,
         ffn_type=("swiglu_conv1d", "swiglu_conv1d"),
-        ffn_hidden_dim=(192, 192),
-        conv1d_kernel=8,
+        ffn_hidden_dim=(256, 256),
+        conv1d_kernel=4,
         conv1d_shift=1,
         dropout=0.0,
         eps=1.0e-5,
@@ -279,36 +289,31 @@ class LocoformerBlock(nn.Module):
             "layernorm": nn.LayerNorm,
             "rmsgroupnorm": RMSGroupNorm,
         }
-        if norm_type not in Norm:
-            raise ValueError(norm_type)
-
+        
         ffn_type_list = ffn_type if isinstance(ffn_type, (list, tuple)) else [ffn_type]
         ffn_hidden_list = ffn_hidden_dim if isinstance(ffn_hidden_dim, (list, tuple)) else [ffn_hidden_dim]
 
         self.macaron_style = len(ffn_type_list) == 2
-        if self.macaron_style and len(ffn_hidden_list) != 2:
-            raise ValueError("Two FFNs required when using Macaron-style model")
-        if len(ffn_type_list) != len(ffn_hidden_list):
-            raise ValueError("ffn_type and ffn_hidden_dim length mismatch")
-
+        
         self.ffn_norm = nn.ModuleList([])
         self.ffn = nn.ModuleList([])
-        for f_type, f_dim in zip(ffn_type_list[::-1], ffn_hidden_list[::-1]):
-            if f_type not in FFN:
+
+        for f_type, f_dim in zip(ffn_type_list, ffn_hidden_list):
+             if f_type not in FFN:
                 raise ValueError(f_type)
-            if norm_type == "rmsgroupnorm":
-                self.ffn_norm.append(Norm[norm_type](num_groups, emb_dim, eps=eps))
-            else:
-                self.ffn_norm.append(Norm[norm_type](emb_dim, eps=eps))
-            self.ffn.append(
-                FFN[f_type](
-                    emb_dim,
-                    f_dim,
-                    conv1d_kernel,
-                    conv1d_shift,
-                    dropout=dropout,
-                )
-            )
+             if norm_type == "rmsgroupnorm":
+                 self.ffn_norm.append(Norm[norm_type](num_groups, emb_dim, eps=eps))
+             else:
+                 self.ffn_norm.append(Norm[norm_type](emb_dim, eps=eps))
+             self.ffn.append(
+                 FFN[f_type](
+                     emb_dim,
+                     f_dim,
+                     conv1d_kernel,
+                     conv1d_shift,
+                     dropout=dropout,
+                 )
+             )
 
         if norm_type == "rmsgroupnorm":
             self.attn_norm = Norm[norm_type](num_groups, emb_dim, eps=eps)
@@ -325,12 +330,14 @@ class LocoformerBlock(nn.Module):
 
     def forward(self, x):
         B, T, Freq, C = x.shape
+        # Scale residual connections by 0.5 if macaron style (as per paper Eq. 2 & 4)
+        scale = 0.5 if self.macaron_style else 1.0
 
         if self.macaron_style:
             input_ = x
-            output = self.ffn_norm[-1](x)
-            output = self.ffn[-1](output)
-            output = output + input_
+            output = self.ffn_norm[0](x)
+            output = self.ffn[0](output)
+            output = output * scale + input_ 
         else:
             output = x
 
@@ -340,13 +347,18 @@ class LocoformerBlock(nn.Module):
         output = self.attn(output)
         output = output.view([B, T, Freq, C]) + input_
 
-        input_ = output
-        output = self.ffn_norm[0](output)
-        output = self.ffn[0](output)
-        output = output + input_
+        if self.macaron_style:
+            input_ = output
+            output = self.ffn_norm[1](output)
+            output = self.ffn[1](output)
+            output = output * scale + input_ 
+        elif len(self.ffn) == 1:
+            input_ = output
+            output = self.ffn_norm[0](output)
+            output = self.ffn[0](output)
+            output = output + input_
 
         return output
-
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(
@@ -407,7 +419,7 @@ class MultiHeadSelfAttention(nn.Module):
         query, key, value = x[..., 0, :], x[..., 1, :], x[..., 2, :]
         return query, key, value
 
-    @torch.cuda.amp.autocast(enabled=False)
+    @torch.cuda.amp.autocast(enabled=True)
     def apply_rope(self, query, key):
         query = self.rope.rotate_queries_or_keys(query)
         key = self.rope.rotate_queries_or_keys(key)
@@ -494,7 +506,7 @@ class RMSGroupNorm(nn.Module):
         self.eps = eps
         self.num_groups = num_groups
 
-    @torch.cuda.amp.autocast(enabled=False)
+    @torch.cuda.amp.autocast(enabled=True)
     def forward(self, input):
         others = input.shape[:-1]
         input = input.view(others + (self.num_groups, self.dim_per_group))
@@ -507,5 +519,5 @@ class RMSGroupNorm(nn.Module):
             output = output + self.beta
         return output
 
-
+# (RotaryEmbedding, MultiHeadSelfAttention, ConvDeconv1d, SwiGLUConvDeconv1d, RMSGroupNorm are unchanged)
 TFLocoformerSeparator = tf_locoformer_separator
