@@ -37,9 +37,15 @@ os.environ['WANDB_PROJECT'] = 'mcorec'
 
 
 
-def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming=False):
+def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming=False, data_root=None, mcorec_data_root=None):
     # streaming=True to avoid downloading all dataset at once, but it can be crash if network is unstable
     # streaming=False to download all dataset at once, it take time and around 1.5TB disk space. More stable.
+    # data_root: optional. Parent of lrs2/, vox2/, avyt/, dialog/. If None, use /net/bull/work1/chime-9 (default).
+    # mcorec_data_root: optional. Dir with mcorec-train-*.tar, mcorec-valid-*.tar. If None, use /net/bull/work3/backup/chime-9/processed (default). Only used when include_mcorec.
+    if data_root is None:
+        data_root = "/net/bull/work1/chime-9"
+    if mcorec_data_root is None:
+        mcorec_data_root = "/net/bull/work3/backup/chime-9/processed"
 
     def format_sample(sample):
         sample['label'] = str(sample['label'], encoding='utf-8')
@@ -56,28 +62,28 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
         try:
             # Load dataset. It's quite bigdataset and sometime downloading can break. You can simple retry.
             lrs2 = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", streaming=streaming, data_files={
-                "train": "/net/bull/work1/chime-9/lrs2/lrs2-train-*.tar",
-                "pretrain": "/net/bull/work1/chime-9/lrs2/lrs2-pretrain-*.tar",
-                "valid": "/net/bull/work1/chime-9/lrs2/lrs2-valid-*.tar",
-                "test_snr_0_interferer_2": "/net/bull/work1/chime-9/lrs2/lrs2-test_snr_0_interferer_2-*.tar",
+                "train": os.path.join(data_root, "lrs2", "lrs2-train-*.tar"),
+                "pretrain": os.path.join(data_root, "lrs2", "lrs2-pretrain-*.tar"),
+                "valid": os.path.join(data_root, "lrs2", "lrs2-valid-*.tar"),
+                "test_snr_0_interferer_2": os.path.join(data_root, "lrs2", "lrs2-test_snr_0_interferer_2-*.tar"),
             }).remove_columns(['__key__', '__url__'])
             vox2 = datasets.load_dataset("nguyenvulebinh/AVYT", "vox2", streaming=streaming, data_files={
-                "dev": "/net/bull/work1/chime-9/vox2/vox2-dev-*.tar",
+                "dev": os.path.join(data_root, "vox2", "vox2-dev-*.tar"),
             }).remove_columns(['__key__', '__url__'])
             avyt = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt", streaming=streaming, data_files={
-                "talking": "/net/bull/work1/chime-9/avyt/talking-*.tar",
-                "silent":  "/net/bull/work1/chime-9/avyt/silent-*.tar",
+                "talking": os.path.join(data_root, "avyt", "talking-*.tar"),
+                "silent":  os.path.join(data_root, "avyt", "silent-*.tar"),
             }).remove_columns(['__key__', '__url__'])
             avyt_mix = datasets.load_dataset("nguyenvulebinh/AVYT", "avyt-mix", streaming=streaming, data_files={
-                "train": "/net/bull/work1/chime-9/dialog/dialog-train-*.tar",
-                "test":  "/net/bull/work1/chime-9/dialog/dialog-test-*.tar",
+                "train": os.path.join(data_root, "dialog", "dialog-train-*.tar"),
+                "test":  os.path.join(data_root, "dialog", "dialog-test-*.tar"),
             }).remove_columns(['__key__', '__url__'])
             # Load mcorec dataset. Ensure you have permission to use this dataset.
             if include_mcorec:
                 print("Loading MCoRec dataset")
                 mcorec_dataset = datasets.load_dataset("MCoRecChallenge/MCoRec", streaming=streaming, data_files={
-                    "train": "/net/bull/work3/backup/chime-9/processed/mcorec-train-*.tar",
-                    "valid":  "/net/bull/work3/backup/chime-9/processed/mcorec-valid-*.tar",
+                    "train": os.path.join(mcorec_data_root, "mcorec-train-*.tar"),
+                    "valid":  os.path.join(mcorec_data_root, "mcorec-valid-*.tar"),
                 }).remove_columns(['__key__', '__url__'])
             finished_loading = True
         except Exception as e:
@@ -178,7 +184,7 @@ def load_avsr_dataset(cache_dir='data-bin/cache', include_mcorec=True, streaming
     # load lrs2 for interference speech
     # interference_speech = None
     print("Loading interference speech dataset. Actual file around 10GB need to download. This may take a while...")
-    interference_speech = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", cache_dir=cache_dir, data_files='/net/bull/work1/chime-9/lrs2/lrs2-train-*.tar').remove_columns(['__key__', '__url__'])['train']
+    interference_speech = datasets.load_dataset("nguyenvulebinh/AVYT", "lrs2", cache_dir=cache_dir, data_files=os.path.join(data_root, "lrs2", "lrs2-train-*.tar")).remove_columns(['__key__', '__url__'])['train']
     return train_dataset, valid_dataset, interference_speech
 
 
@@ -204,6 +210,10 @@ if __name__ == "__main__":
     parser.add_argument("--report_to", type=str, default="none") # wandb or none
     parser.add_argument("--output_dir", type=str, default=os.path.join(os.path.dirname(os.path.dirname(__file__)), f"model-bin"))
     parser.add_argument("--bf16", action="store_true", default=False)
+    parser.add_argument("--data_root", type=str, default=None,
+        help="Optional. Parent of lrs2/, vox2/, avyt/, dialog/. If not set, use /net/bull/work1/chime-9.")
+    parser.add_argument("--mcorec_data_root", type=str, default=None,
+        help="Optional. Dir with mcorec-train-*.tar, mcorec-valid-*.tar. If not set, use /net/bull/work3/backup/chime-9/processed. Only used with --include_mcorec.")
 
     args = parser.parse_args()
 
@@ -269,7 +279,9 @@ if __name__ == "__main__":
         param.requires_grad = True
     
     # Load dataset
-    train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(streaming=streaming_dataset, include_mcorec=include_mcorec)
+    train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(
+        streaming=streaming_dataset, include_mcorec=include_mcorec,
+        data_root=args.data_root, mcorec_data_root=args.mcorec_data_root)
         
     train_av_data_collator = DataCollator(
         text_transform=text_transform,

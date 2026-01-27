@@ -204,3 +204,5 @@ src/ibug/**/weights/*
 script/_*.py
 
 trun_*.sh
+
+tsubame_*.sh

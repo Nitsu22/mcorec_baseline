@@ -111,5 +111,15 @@ class AVSRTrainer(Trainer):
                 sisnr_s_main_i = getattr(outputs, "sisnr_s_main_i", None)
                 if sisnr_s_main_i is not None:
                     self.log({"sisnr_s_main_i": sisnr_s_main_i.detach().mean().item()})
+                loss_ctc = getattr(outputs, "loss_ctc", None)
+                loss_att = getattr(outputs, "loss_att", None)
+                if loss_ctc is not None and loss_att is not None:
+                    unwrapped = model.module if hasattr(model, "module") else model
+                    mtlalpha = getattr(getattr(unwrapped, "config", None), "mtlalpha", None)
+                    if mtlalpha is None:
+                        mtlalpha = getattr(getattr(unwrapped, "avsr", None), "mtlalpha", None)
+                    if mtlalpha is not None:
+                        asr_loss = mtlalpha * loss_ctc + (1 - mtlalpha) * loss_att
+                        self.log({"asr_loss": asr_loss.detach().mean().item()})
 
         return (loss, outputs) if return_outputs else loss

@@ -14,8 +14,9 @@ torchrun --nproc_per_node 1 script/train_sep_nitsu_step2.py \
     --save_steps 2000 \
     --eval_steps 2000 \
     --learning_rate 1e-3 \
-    --checkpoint_name mcorec_finetuning_2spk_sep_input_step2_log \
-    --model_name_or_path ./model-bin/mcorec_finetuning_2spk_sep_input/checkpoint-62000 \
+    --model_name_or_path ./model-bin-phuong/avsr_cocktail \
+    --checkpoint_name mcorec_finetuning_2spk_sep_input_step2 \
+    --model_name_or_path ./model-bin/mcorec_finetuning_2spk_sep_input/checkpoint-4000 \
     --output_dir ./model-bin \
     2>&1 | tee train_sep_nitsu_step2.log
     #--resume_from_checkpoint
