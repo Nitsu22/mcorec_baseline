@@ -5,12 +5,8 @@ export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
 export CUDA_VISIBLE_DEVICES=0
 
-# When /net/bull is not mounted on the run node, set CHIME9_DATA_ROOT to the parent of lrs2/, vox2/, avyt/, dialog/
-# Example: export CHIME9_DATA_ROOT=/data/chime-9
-export CHIME9_DATA_ROOT="${CHIME9_DATA_ROOT:-/net/bull/work1/chime-9}"
-
-# freeze backbone script
-torchrun --nproc_per_node 1 script/train_sep_nitsu_all.py \
+# train all script
+torchrun --nproc_per_node 1 script/train_sep_nitsu_step2.py \
     --streaming_dataset \
     --batch_size 2 \
     --max_steps 400000 \
@@ -19,10 +15,9 @@ torchrun --nproc_per_node 1 script/train_sep_nitsu_all.py \
     --eval_steps 2000 \
     --learning_rate 1e-3 \
     --model_name_or_path ./model-bin-phuong/avsr_cocktail \
-    --checkpoint_name mcorec_finetuning_2spk_sep_input_all \
+    --checkpoint_name mcorec_finetuning_2spk_sep_input \
     --output_dir ./model-bin \
-    --data_root "${CHIME9_DATA_ROOT}" \
-    2>&1 | tee train_sep_nitsu_all.log
+    2>&1 | tee train_sep_nitsu_step2.log
     #--resume_from_checkpoint
     # --model_name_or_path ./model-bin-phuong/avsr_cocktail \
     # --warmup_steps 4000 \
