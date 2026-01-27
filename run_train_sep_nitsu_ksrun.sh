@@ -48,7 +48,7 @@ torchrun --nnodes=2 --nproc_per_node=1 --node_rank=$NODE_RANK \
   script/train_sep_nitsu.py \
   --streaming_dataset \
   --batch_size 2 \
-  --max_steps 400000 \
+  --max_steps 100000 \
   --gradient_accumulation_steps 3 \
   --save_steps 2000 \
   --eval_steps 2000 \
