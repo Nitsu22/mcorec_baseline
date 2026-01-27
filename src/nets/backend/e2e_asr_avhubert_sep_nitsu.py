@@ -15,12 +15,13 @@ from src.nets.backend.nets_utils import (
 from src.nets.backend.transformer.add_sos_eos import add_sos_eos
 from src.nets.backend.transformer.decoder import Decoder
 # from src.nets.backend.transformer.encoder import Encoder
-from src.nets.backend.backbones.avhubert_daichi import AVHubertModel
+from src.nets.backend.backbones.avhubert_nitsu import AVHubertModel
 from src.nets.backend.transformer.label_smoothing_loss import LabelSmoothingLoss
 from src.nets.backend.transformer.mask import target_mask
 from src.nets.backend.nets_utils import MLPHead
 
-from src.separator.tf_locoformer_daichi import tf_locoformer_separator
+from src.separator.seanet_nitsu import seanet_separator
+from src.separator.si_snr import cal_SISNR
 # from src.separator.loss_seanet import loss_speech
 
 
@@ -121,14 +122,28 @@ class E2E(torch.nn.Module):
 
         # TODO: define separator layers
         #=========================================================
-        self.separator = tf_locoformer_separator()
+        self.separator = seanet_separator() # Default config N = 1024, L = 40, B = 1024, H = 128, K = 100, R = 6
         self.separator = self.separator.float()
         # self.loss_se = loss_speech().cuda()
         self.mse_loss_feat = torch.nn.MSELoss()
         #=========================================================
 
 
-    def forward(self, video, audio, video_lengths, audio_lengths, label, label_audios, label_noises, label_audio_lengths, label_noise_lengths):
+    def forward(
+        self,
+        video,
+        audio,
+        video_lengths,
+        audio_lengths,
+        label,
+        label_audios,
+        label_noises,
+        label_audio_lengths,
+        label_noise_lengths,
+        audios_raw=None,
+        label_audios_raw=None,
+        label_noises_raw=None,
+    ):
         video_padding_mask = make_non_pad_mask(video_lengths).to(video.device)
         # attention_mask = 
         # avhubert_features = self.encoder(
@@ -170,7 +185,10 @@ class E2E(torch.nn.Module):
         # print('B, T, D', B, T, D)
         # print(x_hidden_states[hidden_layer_idx])
 
-        out_s, out_n = self.separator(x_hidden_states[hidden_layer_idx], M=B)
+        if audios_raw is None or label_audios_raw is None or label_noises_raw is None:
+            raise ValueError("audios_raw, label_audios_raw, and label_noises_raw are required for SI-SNR loss.")
+
+        out_s, out_n = self.separator(audios_raw, x_hidden_states[hidden_layer_idx], M=B)
         # print('out_s', out_s)
         # print('out_s.shape', out_s.shape)
         # print('label_audios.shape', label_audios.repeat(5,1).shape)
@@ -180,10 +198,27 @@ class E2E(torch.nn.Module):
         # label_audios.shape torch.Size([3, 104, 400])
         # 104 --> configuration_avhubert_avsr.py : audio_feat_dim=104
 
-        loss_s_main = self.mse_loss_feat(out_s[-B:,:,:], label_audios)
-        loss_n_main = self.mse_loss_feat(out_n[-B:,:,:], label_noises)	
-        loss_n_rest = self.mse_loss_feat(out_n[:-B,:,:], label_noises.repeat(2, 1, 1))
-        loss_s_rest = self.mse_loss_feat(out_s[:-B,:,:], label_audios.repeat(2, 1, 1))
+
+        out_s_main = out_s[-B:]
+        out_n_main = out_n[-B:]
+        sisnr_s_main = cal_SISNR(label_audios_raw, out_s_main)
+        sisnr_n_main = cal_SISNR(label_noises_raw, out_n_main)
+        loss_s_main = -torch.sum(sisnr_s_main)
+        loss_n_main = -torch.sum(sisnr_n_main)
+        sisnr_s_main_i = torch.mean(sisnr_s_main - cal_SISNR(label_audios_raw, audios_raw))
+
+        repeat_count = out_s.size(0) // B - 1
+        if repeat_count > 0:
+            out_s_rest = out_s[:-B]
+            out_n_rest = out_n[:-B]
+            label_audios_rep = label_audios_raw.repeat(repeat_count, 1)
+            label_noises_rep = label_noises_raw.repeat(repeat_count, 1)
+            loss_n_rest = -torch.sum(cal_SISNR(label_noises_rep, out_n_rest))
+            loss_s_rest = -torch.sum(cal_SISNR(label_audios_rep, out_s_rest))
+        else:
+            loss_n_rest = torch.tensor(0.0, device=out_s.device)
+            loss_s_rest = torch.tensor(0.0, device=out_s.device)
+
         loss_sep = loss_s_main + (loss_n_main + loss_n_rest + loss_s_rest) * 0.1
 
         # loss_s_main = self.loss_se.forward(out_s[-B:,:], speech)
@@ -215,4 +250,4 @@ class E2E(torch.nn.Module):
         )
 
         # return loss, loss_ctc, loss_att, acc
-        return loss, loss_ctc, loss_att, loss_sep, acc
+        return loss, loss_ctc, loss_att, loss_sep, acc, sisnr_s_main_i

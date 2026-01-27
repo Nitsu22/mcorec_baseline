@@ -477,7 +477,7 @@ class SwiGLUConvDeconv1d(nn.Module):
 
 
 class RMSGroupNorm(nn.Module):
-    def __init__(self, num_groups, dim, eps=1e-8, bias=False):
+    def __init__(self, num_groups, dim, eps=1e-4, bias=False):
         super().__init__()
         if dim % num_groups != 0:
             raise ValueError(dim, num_groups)

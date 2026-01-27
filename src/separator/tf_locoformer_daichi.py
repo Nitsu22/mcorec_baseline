@@ -6,6 +6,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _check_finite(name, tensor):
+    finite = torch.isfinite(tensor)
+    if not finite.all():
+        nonfinite = (~finite).sum().item()
+        total = tensor.numel()
+        raise RuntimeError(
+            f"{name} has non-finite values: {nonfinite}/{total} "
+            f"(dtype={tensor.dtype}, shape={tuple(tensor.shape)})"
+        )
+
+
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim: int, base: int = 10000):
         super().__init__()
@@ -64,8 +75,9 @@ class tf_locoformer_separator(nn.Module):
         input_dim: int = 1024,
         output_dim: int = 104,
         num_spk: int = 1,
+        compress_dim: int = 256,
         # --- Small Model Config ---
-        n_layers: int = 4,          # B=4
+        n_layers: int = 1,          # B=4
         emb_dim: int = 96,          # D=96
         ffn_hidden_dim: Union[int, List[int]] = (256, 256), # C=256
         conv1d_kernel: int = 4,     # K=4
@@ -86,10 +98,16 @@ class tf_locoformer_separator(nn.Module):
         super().__init__()
         if num_spk != 1:
             raise ValueError("This separator supports num_spk=1 only.")
+        if compress_dim <= 0 or compress_dim > input_dim:
+            raise ValueError(f"compress_dim must be in [1, {input_dim}], got {compress_dim}")
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.n_layers = n_layers
         self.R = R
+        self.compress_dim = compress_dim
+
+        self.in_proj = nn.Linear(input_dim, compress_dim, bias=False)
+        self.out_proj = nn.Linear(compress_dim, input_dim, bias=False)
 
         # Input Convolution (Encoder equivalent)
         t_ksize = 3
@@ -158,22 +176,34 @@ class tf_locoformer_separator(nn.Module):
         if mix.shape[-1] != self.input_dim:
             raise ValueError(f"Expected input_dim={self.input_dim}, got {mix.shape[-1]}")
 
+        _check_finite("mix", mix)
+
         with torch.cuda.amp.autocast(enabled=True):
+            mix_comp = self.in_proj(mix)  # [B, T, compress_dim]
+            _check_finite("mix_comp", mix_comp)
+            batch = mix_comp.unsqueeze(1)  # [B, 1, T, compress_dim]
             batch = batch.to(torch.float32)
             z = self.conv(batch)  # [B, emb_dim, T, F]
+            _check_finite("conv_out", z)
 
-        for block in self.blocks:
+        for idx, block in enumerate(self.blocks):
             z = block(z)
+            _check_finite(f"block_{idx}_out", z)
 
         # --- Mapping Output ---
         # Direct estimation instead of masking
         est_feat_map = self.output_head(z)  # [B, 1, T, F]
-        est_feat_1024 = est_feat_map.squeeze(1) # [B, T, F]
+        _check_finite("output_head_out", est_feat_map)
+        est_feat_comp = est_feat_map.squeeze(1)  # [B, T, compress_dim]
+        _check_finite("est_feat_comp", est_feat_comp)
+        est_feat_1024 = self.out_proj(est_feat_comp)  # [B, T, input_dim]
+        _check_finite("out_proj_out", est_feat_1024)
         
         # Note: If your target features are strictly positive, you might want F.relu() here.
         # For general mapping (e.g., Log-Mel or complex real/imag parts), linear output is correct.
 
         est_speech = self.basis_linear(est_feat_1024)  # [B, T, out_dim]
+        _check_finite("basis_linear_out", est_speech)
 
         if self.R > 1:
             est_speech = est_speech.repeat(self.R, 1, 1)
@@ -191,9 +221,9 @@ class TFLocoformerBlock(nn.Module):
         rope_time,
         emb_dim=96,
         norm_type="rmsgroupnorm",
-        num_groups=4,
+        num_groups=4, # G=4
         tf_order="ft",
-        n_heads=4,
+        n_heads=4, # H=4
         flash_attention=False,
         attention_dim=96,
         ffn_type=("swiglu_conv1d", "swiglu_conv1d"),
@@ -241,24 +271,33 @@ class TFLocoformerBlock(nn.Module):
         )
 
     def forward(self, input):
+        _check_finite("TFLocoformerBlock.input", input)
         if self.tf_order == "ft":
             return self.freq_frame_process(input)
         return self.frame_freq_process(input)
 
     def freq_frame_process(self, input):
         output = input.movedim(1, -1)
+        _check_finite("TFLocoformerBlock.freq_frame.input_moved", output)
         output = self.freq_path(output)
+        _check_finite("TFLocoformerBlock.freq_frame.after_freq_path", output)
 
         output = output.transpose(1, 2)
+        _check_finite("TFLocoformerBlock.freq_frame.after_transpose", output)
         output = self.frame_path(output)
+        _check_finite("TFLocoformerBlock.freq_frame.after_frame_path", output)
         return output.transpose(-1, 1)
 
     def frame_freq_process(self, input):
         output = input.transpose(1, -1)
+        _check_finite("TFLocoformerBlock.frame_freq.input_transpose", output)
         output = self.frame_path(output)
+        _check_finite("TFLocoformerBlock.frame_freq.after_frame_path", output)
 
         output = output.transpose(1, 2)
+        _check_finite("TFLocoformerBlock.frame_freq.after_transpose", output)
         output = self.freq_path(output)
+        _check_finite("TFLocoformerBlock.frame_freq.after_freq_path", output)
         return output.movedim(-1, 1)
 
 
@@ -329,6 +368,7 @@ class LocoformerBlock(nn.Module):
         )
 
     def forward(self, x):
+        _check_finite("LocoformerBlock.input", x)
         B, T, Freq, C = x.shape
         # Scale residual connections by 0.5 if macaron style (as per paper Eq. 2 & 4)
         scale = 0.5 if self.macaron_style else 1.0
@@ -336,27 +376,40 @@ class LocoformerBlock(nn.Module):
         if self.macaron_style:
             input_ = x
             output = self.ffn_norm[0](x)
+            _check_finite("LocoformerBlock.ffn0_norm_out", output)
             output = self.ffn[0](output)
+            _check_finite("LocoformerBlock.ffn0_out", output)
             output = output * scale + input_ 
+            _check_finite("LocoformerBlock.ffn0_res_out", output)
         else:
             output = x
 
         input_ = output
         output = self.attn_norm(output)
+        _check_finite("LocoformerBlock.attn_norm_out", output)
         output = output.view([B * T, Freq, C])
+        _check_finite("LocoformerBlock.attn_in", output)
         output = self.attn(output)
+        _check_finite("LocoformerBlock.attn_out", output)
         output = output.view([B, T, Freq, C]) + input_
+        _check_finite("LocoformerBlock.attn_res_out", output)
 
         if self.macaron_style:
             input_ = output
             output = self.ffn_norm[1](output)
+            _check_finite("LocoformerBlock.ffn1_norm_out", output)
             output = self.ffn[1](output)
+            _check_finite("LocoformerBlock.ffn1_out", output)
             output = output * scale + input_ 
+            _check_finite("LocoformerBlock.ffn1_res_out", output)
         elif len(self.ffn) == 1:
             input_ = output
             output = self.ffn_norm[0](output)
+            _check_finite("LocoformerBlock.ffn_norm_out", output)
             output = self.ffn[0](output)
+            _check_finite("LocoformerBlock.ffn_out", output)
             output = output + input_
+            _check_finite("LocoformerBlock.ffn_res_out", output)
 
         return output
 
@@ -414,9 +467,14 @@ class MultiHeadSelfAttention(nn.Module):
 
     def get_qkv(self, input):
         n_batch, seq_len = input.shape[:2]
+        _check_finite("MultiHeadSelfAttention.input", input)
         x = self.qkv(input).reshape(n_batch, seq_len, 3, self.n_heads, -1)
+        _check_finite("MultiHeadSelfAttention.qkv_out", x)
         x = x.movedim(-2, 1)
         query, key, value = x[..., 0, :], x[..., 1, :], x[..., 2, :]
+        _check_finite("MultiHeadSelfAttention.query", query)
+        _check_finite("MultiHeadSelfAttention.key", key)
+        _check_finite("MultiHeadSelfAttention.value", value)
         return query, key, value
 
     @torch.cuda.amp.autocast(enabled=True)
@@ -479,13 +537,19 @@ class SwiGLUConvDeconv1d(nn.Module):
         x = F.pad(x, (self.diff_ks, seq_len - s2 - self.diff_ks))
 
         x = self.conv1d(x)
+        _check_finite("SwiGLUConvDeconv1d.conv1d_out", x)
         gate = self.swish(x[..., self.dim_inner :, :])
+        _check_finite("SwiGLUConvDeconv1d.gate", gate)
         x = x[..., : self.dim_inner, :] * gate
+        _check_finite("SwiGLUConvDeconv1d.gated", x)
         x = self.dropout(x)
         x = self.deconv1d(x).transpose(-1, -2)
+        _check_finite("SwiGLUConvDeconv1d.deconv1d_out", x)
 
         x = x[..., self.diff_ks : self.diff_ks + s2, :]
-        return self.dropout(x).view(b, s1, s2, h)
+        x = self.dropout(x)
+        _check_finite("SwiGLUConvDeconv1d.output", x)
+        return x.view(b, s1, s2, h)
 
 
 class RMSGroupNorm(nn.Module):
@@ -506,17 +570,26 @@ class RMSGroupNorm(nn.Module):
         self.eps = eps
         self.num_groups = num_groups
 
-    @torch.cuda.amp.autocast(enabled=True)
+    @torch.cuda.amp.autocast(enabled=False)
     def forward(self, input):
+        _check_finite("RMSGroupNorm.input", input)
         others = input.shape[:-1]
         input = input.view(others + (self.num_groups, self.dim_per_group))
+        _check_finite("RMSGroupNorm.input_reshaped", input)
         norm_ = input.norm(2, dim=-1, keepdim=True)
+        _check_finite("RMSGroupNorm.norm", norm_)
         rms = norm_ * self.dim_per_group ** (-1.0 / 2)
+        _check_finite("RMSGroupNorm.rms", rms)
         output = input / (rms + self.eps)
+        _check_finite("RMSGroupNorm.output_normed", output)
         output = output.view(others + (-1,))
+        _check_finite("RMSGroupNorm.output_reshaped", output)
+        _check_finite("RMSGroupNorm.gamma", self.gamma)
         output = output * self.gamma
+        _check_finite("RMSGroupNorm.output_scaled", output)
         if self.bias:
             output = output + self.beta
+            _check_finite("RMSGroupNorm.output_biased", output)
         return output
 
 # (RotaryEmbedding, MultiHeadSelfAttention, ConvDeconv1d, SwiGLUConvDeconv1d, RMSGroupNorm are unchanged)

@@ -1,4 +1,5 @@
 from transformers.trainer import *
+import torch
 from typing import Callable, Dict, List, Optional, Tuple, Union, Type
 
 class AVSRTrainer(Trainer):
@@ -100,3 +101,15 @@ class AVSRTrainer(Trainer):
                 self._eval_dataloaders = {dataloader_key: eval_dataloader}
 
         return self.accelerator.prepare(eval_dataloader)
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        if model.training and self.args.logging_steps > 0:
+            if self.state.global_step % self.args.logging_steps == 0:
+                sisnr_s_main_i = getattr(outputs, "sisnr_s_main_i", None)
+                if sisnr_s_main_i is not None:
+                    self.log({"sisnr_s_main_i": sisnr_s_main_i.detach().mean().item()})
+
+        return (loss, outputs) if return_outputs else loss
