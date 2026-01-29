@@ -454,6 +454,7 @@ class AVHubertModel(PreTrainedModel):
         features_only: bool = False,
         output_layer: Optional[int] = None,
         video: Optional[torch.Tensor] = None,
+        output_hidden_states: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """output layer is 1-based"""
         src_audio, src_video = source['audio'], source['video']
@@ -515,7 +516,11 @@ class AVHubertModel(PreTrainedModel):
         
         # TODO
         # x = self.encoder(x, attention_mask=padding_mask)[0]
-        x = self.encoder(x, attention_mask=padding_mask, output_hidden_states=True)
+        x = self.encoder(
+            x,
+            attention_mask=padding_mask,
+            output_hidden_states=output_hidden_states,
+        )
         # x = self.encoder(
         #     x,
         #     # attention_mask=padding_mask,
@@ -550,6 +555,7 @@ class AVHubertModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         video: torch.Tensor = None,
+        output_hidden_states: bool = True,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         res = self.forward_gen(
@@ -558,12 +564,20 @@ class AVHubertModel(PreTrainedModel):
             mask=False,
             features_only=True,
             output_layer=None,
+            output_hidden_states=output_hidden_states,
         )
-        # feature = res["x"]
-        feature = res["x"][0]
-        if res["x"][1] is not None:
-            return BaseModelOutput(last_hidden_state=feature, hidden_states=res["x"][1], attentions=None)
-        return BaseModelOutput(last_hidden_state=feature, hidden_states=None, attentions=None)
+        x = res["x"]
+        if hasattr(x, "last_hidden_state"):
+            feature = x.last_hidden_state
+            hidden_states = getattr(x, "hidden_states", None)
+        else:
+            feature = x[0]
+            hidden_states = x[1] if len(x) > 1 else None
+        return BaseModelOutput(
+            last_hidden_state=feature,
+            hidden_states=hidden_states,
+            attentions=None,
+        )
 
     def extract_features(
         self,

@@ -254,7 +254,7 @@ class E2E(torch.nn.Module):
         pred_pad, _ = self.decoder(ys_in_pad, ys_mask, x, video_padding_mask.unsqueeze(-2))
         loss_att = self.criterion(pred_pad, ys_out_pad)
 
-        loss = self.mtlalpha * loss_ctc + (1 - self.mtlalpha) * loss_att + 0.1 * loss_sep
+        loss = self.mtlalpha * loss_ctc + (1 - self.mtlalpha) * loss_att + 0.01 * loss_sep
         # loss = loss_sep
 
         acc = th_accuracy(
