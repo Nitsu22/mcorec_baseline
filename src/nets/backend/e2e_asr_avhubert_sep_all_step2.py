@@ -158,6 +158,7 @@ class E2E(torch.nn.Module):
             input_features = audio, 
             video = video,
             attention_mask = video_padding_mask,
+            output_hidden_states=True,
         )
         
         # avhubert_features = self.encoder(
@@ -231,7 +232,7 @@ class E2E(torch.nn.Module):
             loss_n_rest = torch.tensor(0.0, device=out_s.device)
             loss_s_rest = torch.tensor(0.0, device=out_s.device)
 
-        loss_sep = loss_s_main + (loss_n_main + loss_n_rest + loss_s_rest) * 0.1
+        loss_sep = loss_s_main + (loss_n_main + loss_n_rest + loss_s_rest) * 0.01
 
         # loss_s_main = self.loss_se.forward(out_s[-B:,:], speech)
         # loss_n_main = self.loss_se.forward(out_n[-B:,:], noise)	
@@ -254,7 +255,7 @@ class E2E(torch.nn.Module):
         pred_pad, _ = self.decoder(ys_in_pad, ys_mask, x, video_padding_mask.unsqueeze(-2))
         loss_att = self.criterion(pred_pad, ys_out_pad)
 
-        loss = self.mtlalpha * loss_ctc + (1 - self.mtlalpha) * loss_att + 0.01 * loss_sep
+        loss = self.mtlalpha * loss_ctc + (1 - self.mtlalpha) * loss_att + 0.1 * loss_sep
         # loss = loss_sep
 
         acc = th_accuracy(

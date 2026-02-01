@@ -21,7 +21,6 @@ from src.nets.backend.transformer.mask import target_mask
 from src.nets.backend.nets_utils import MLPHead
 
 from src.separator.seanet_nitsu import seanet_separator
-from src.separator.si_snr import cal_SISNR
 # from src.separator.loss_seanet import loss_speech
 
 
@@ -175,74 +174,8 @@ class E2E(torch.nn.Module):
 
         # x = self.fusion(torch.cat((video_feat, audio_feat), dim=-1))
         x = avhubert_features.last_hidden_state
-        x_hidden_states = avhubert_features.hidden_states
-
-        # TODO: input x_hidden_states [2 or 3] to separator layers
-        #=========================================================
-        # print('X_HIDDEN_STATES_LEN', len(x_hidden_states))
-        # print('X_HIDDEN_STATES_DIM', x_hidden_states[2].shape)
-        # OUTPUTS:
-        # X_HIDDEN_STATES_LEN 25
-        # X_HIDDEN_STATES_DIM torch.Size([16, 400, 1024]) -> Bs x T x D
-        if x_hidden_states is None:
-            raise ValueError("avhubert_features.hidden_states is None. Enable output_hidden_states to use weighted layers.")
-        sep_w = torch.softmax(self.sep_feature_weights, dim=0)
-        if sep_w.numel() != len(x_hidden_states):
-            raise ValueError(
-                f"sep_feature_weights length {sep_w.numel()} does not match hidden_states length {len(x_hidden_states)}"
-            )
-        hidden_states = torch.stack(x_hidden_states, dim=0)  # [N, B, T, D]
-        hidden_states = hidden_states.permute(1, 0, 2, 3)    # [B, N, T, D]
-        hidden_states = (hidden_states * sep_w[None, :, None, None]).sum(dim=1)  # [B, T, D]
-        B, T, D = hidden_states.shape
-        # print('B, T, D', B, T, D)
-        # print(hidden_states)
-
-        if audios_raw is None or label_audios_raw is None or label_noises_raw is None:
-            raise ValueError("audios_raw, label_audios_raw, and label_noises_raw are required for SI-SNR loss.")
-
-        out_s, out_n = self.separator(audios_raw, hidden_states, M=B)
-        # print('out_s', out_s)
-        # print('out_s.shape', out_s.shape)
-        # print('label_audios.shape', label_audios.repeat(5,1).shape)
-        # print('lengths', video_lengths, audio_lengths)
-        # TODO: DIFFERENT SHAPE OF SEP OUTPUT AND LABEL AUDIO --> How to solve? 
-        # out_s.shape torch.Size([18, 400, 1024])
-        # label_audios.shape torch.Size([3, 104, 400])
-        # 104 --> configuration_avhubert_avsr.py : audio_feat_dim=104
-
-
-        out_s_main = out_s[-B:]
-        out_n_main = out_n[-B:]
-        sisnr_s_main = cal_SISNR(label_audios_raw, out_s_main)
-        sisnr_n_main = cal_SISNR(label_noises_raw, out_n_main)
-        loss_s_main = -torch.sum(sisnr_s_main)
-        loss_n_main = -torch.sum(sisnr_n_main)
-        sisnr_s_main_i = torch.mean(sisnr_s_main - cal_SISNR(label_audios_raw, audios_raw))
-
-        repeat_count = out_s.size(0) // B - 1
-        if repeat_count > 0:
-            out_s_rest = out_s[:-B]
-            out_n_rest = out_n[:-B]
-            label_audios_rep = label_audios_raw.repeat(repeat_count, 1)
-            label_noises_rep = label_noises_raw.repeat(repeat_count, 1)
-            loss_n_rest = -torch.sum(cal_SISNR(label_noises_rep, out_n_rest))
-            loss_s_rest = -torch.sum(cal_SISNR(label_audios_rep, out_s_rest))
-        else:
-            loss_n_rest = torch.tensor(0.0, device=out_s.device)
-            loss_s_rest = torch.tensor(0.0, device=out_s.device)
-
-        loss_sep = loss_s_main + (loss_n_main + loss_n_rest + loss_s_rest) * 0.01
-
-        # loss_s_main = self.loss_se.forward(out_s[-B:,:], speech)
-        # loss_n_main = self.loss_se.forward(out_n[-B:,:], noise)	
-        # loss_n_rest = self.loss_se.forward(out_n[:-B,:], noise.repeat(5, 1))
-        # loss_s_rest = self.loss_se.forward(out_s[:-B,:], speech.repeat(5, 1))
-        # loss = loss_s_main + (loss_n_main + loss_n_rest + loss_s_rest) * 0.1
-        # loss_sep = self.neg_sisdr(est_speech, target_speech)
-
-        #=========================================================
-
+        # NOTE: Separation loss is disabled in step3 (ASR-only fine-tuning).
+        #       Separator modules are kept only for checkpoint compatibility.
         # ctc loss --> label is text
         loss_ctc, ys_hat = self.ctc(x, video_lengths, label)
 
@@ -255,12 +188,10 @@ class E2E(torch.nn.Module):
         pred_pad, _ = self.decoder(ys_in_pad, ys_mask, x, video_padding_mask.unsqueeze(-2))
         loss_att = self.criterion(pred_pad, ys_out_pad)
 
-        # loss = self.mtlalpha * loss_ctc + (1 - self.mtlalpha) * loss_att + 0.1 * loss_sep
-        loss = loss_sep
+        loss = self.mtlalpha * loss_ctc + (1 - self.mtlalpha) * loss_att
 
         acc = th_accuracy(
             pred_pad.view(-1, self.odim), ys_out_pad, ignore_label=self.ignore_id
         )
 
-        # return loss, loss_ctc, loss_att, acc
-        return loss, loss_ctc, loss_att, loss_sep, acc, sisnr_s_main_i
+        return loss, loss_ctc, loss_att, acc

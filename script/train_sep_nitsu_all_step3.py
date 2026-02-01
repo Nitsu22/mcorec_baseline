@@ -5,7 +5,7 @@ import torch
 from datasets import load_from_disk
 from src.dataset.avhubert_dataset_sep_nitsu import load_audio, load_video, cut_or_pad, AudioTransform, VideoTransform, DataCollator
 from src.tokenizer.spm_tokenizer import TextTransform
-from src.avhubert_avsr.avhubert_avsr_model_sep_all import AVHubertAVSR, get_beam_search_decoder
+from src.avhubert_avsr.avhubert_avsr_model_sep_all_step3 import AVHubertAVSR, get_beam_search_decoder
 from src.avhubert_avsr.configuration_avhubert_avsr import AVHubertAVSRConfig
 from transformers import TrainingArguments
 from src.custom_trainer import AVSRTrainer
@@ -256,8 +256,6 @@ if __name__ == "__main__":
         avsr_config = AVHubertAVSRConfig(odim=len(text_transform.token_list))
         avsr_model = AVHubertAVSR(avsr_config)
         
-        for param in avsr_model.avsr.encoder.parameters():
-            param.requires_grad = False
         # Load pretrained encoder checkpoint
         encoder_pretrained_checkpoint = "nguyenvulebinh/avhubert_encoder_large_noise_pt_noise_ft_433h" # AVHubert encoder original (https://facebookresearch.github.io/av_hubert/)
         print("Loading pretrained encoder from", encoder_pretrained_checkpoint)
@@ -269,19 +267,17 @@ if __name__ == "__main__":
 
         # TODO Freeze backbone params
         # print('Freeze backbone')
-    avsr_model.avsr.separator.apply(lambda m: m.reset_parameters()
-        if hasattr(m, "reset_parameters") else None)
     avsr_model.avsr.separator = avsr_model.avsr.separator.float()
-    avsr_model.avsr.sep_feature_weights = torch.nn.Parameter(
-        torch.zeros_like(avsr_model.avsr.sep_feature_weights, dtype=torch.float32)
-    )
     
     for param in avsr_model.avsr.encoder.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     for param in avsr_model.avsr.decoder.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     for param in avsr_model.avsr.ctc.parameters():
+        param.requires_grad = True
+    for param in avsr_model.avsr.separator.parameters():
         param.requires_grad = False
+    avsr_model.avsr.sep_feature_weights.requires_grad = False
     
     # Load dataset
     train_dataset, valid_dataset, interference_dataset = load_avsr_dataset(
@@ -310,8 +306,7 @@ if __name__ == "__main__":
         logging_dir=os.path.join(output_dir, "log"),
         # group_by_length=True,
         # length_column_name='length',
-        label_names = ["labels", "label_audios", "label_noises"],
-        # label_names = ["labels"],
+        label_names = ["labels"],
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         # auto_find_batch_size = True,

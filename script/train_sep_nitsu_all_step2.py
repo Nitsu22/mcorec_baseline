@@ -268,6 +268,7 @@ if __name__ == "__main__":
         # TODO Freeze backbone params
         # print('Freeze backbone')
     avsr_model.avsr.separator = avsr_model.avsr.separator.float()
+    avsr_model.avsr.sep_feature_weights = avsr_model.avsr.sep_feature_weights.float()
     
     for param in avsr_model.avsr.encoder.parameters():
         param.requires_grad = True
